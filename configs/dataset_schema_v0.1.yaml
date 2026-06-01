@@ -1,0 +1,246 @@
+# ============================================================
+# ZOD Pedestrian Intent & Trajectory Dataset — Schema v0.1
+# Last updated: Week 1
+#
+# STATUS LEGEND:
+#   [CONFIRMED]  — decided, ready to implement
+#   [PENDING]    — needs explicit supervisor decision
+# ============================================================
+
+# ─────────────────────────────────────────
+# WINDOWING STRATEGY
+# ─────────────────────────────────────────
+
+windowing:
+  # [CONFIRMED] Unit of data = one observation window
+  # One sequence → multiple overlapping windows → multiple samples
+  unit: observation_window
+
+  # [CONFIRMED] Duration of observation window
+  observation_window_s: 0.5        # ~5 camera frames, ~4 LiDAR scans at ZOD rates
+
+  # [CONFIRMED] Overlap ratio between consecutive windows (PIE uses 0.5 and 0.8)
+  overlap_ratio: 0.5               # → stride = 0.25s
+
+  # [CONFIRMED] Prediction horizons — evaluate at all three (following PIE)
+  prediction_horizons_s: [1.0, 1.5, 2.0]
+
+
+# ─────────────────────────────────────────
+# FILTERING / INCLUSION CRITERIA
+# ─────────────────────────────────────────
+
+filtering:
+  # [CONFIRMED] Max distance from pedestrian to ego vehicle
+  # Pedestrians >50m are too small in camera frame and have sparse LiDAR points
+  max_distance_to_ego_m: 50.0
+
+  # [CONFIRMED] Max distance from pedestrian to ego road boundary
+  # Pedestrians far from road are not crossing candidates
+  max_distance_to_road_m: 15.0
+
+  # [CONFIRMED]  no occlusion-based filtering; all included
+  max_occlusion: Heavy
+
+  # [CONFIRMED] Minimum number of valid LiDAR frames required in a window
+  # If tracking loses the pedestrian for too many frames, discard window
+  min_lidar_frames_in_window: 3    # out of ~4 expected
+
+  # [CONFIRMED] Pedestrian must be visible in LiDAR point cloud (has 3D box)
+  require_lidar_detection: true
+
+
+# ─────────────────────────────────────────
+# SAMPLE STRUCTURE
+# ─────────────────────────────────────────
+
+sample:
+
+  # --- Identity ---
+  sequence_id: str               # e.g. "000007"
+  pedestrian_id: str             # annotation_uuid from object_detection.json
+  sample_id: str                 # "{sequence_id}_{pedestrian_id}_{window_start_ms}"
+
+  # --- Temporal ---
+  # [CONFIRMED] Time-based definition (not frame-count-based)
+  # Allows fair cross-dataset comparison despite different sensor fps
+  window_start_timestamp: str    # UTC, ISO format
+  window_end_timestamp: str      # UTC (= window_start + 0.5s)
+  keyframe_timestamp: str        # UTC timestamp of ZOD annotation frame
+                                 # Note: keyframe is the central frame of the full
+                                 # 20s sequence, not necessarily inside this window
+
+
+  # ─────────────────────────────────────────
+  # INTENT LABEL
+  # ─────────────────────────────────────────
+
+  intent:
+    # [CONFIRMED] Per-window label (one label for entire 0.5s window) (unlike PIE's per-encounter) without requiring per-frame human annotation (unlike PSI)
+    label: crossing | not_crossing | uncertain
+
+    # [PENDING] Definition of "crossing"
+    crossing_definition: TBD
+    crossing_completed: bool 
+
+    # [CONFIRMED] Confidence score from labeling pipeline
+    # High confidence: trajectory clearly crosses / clearly stays away from road
+    # Low confidence: trajectory near road boundary, ambiguous motion
+    confidence: float              # 0.0 – 1.0
+
+    # [CONFIRMED] Labeling method — for transparency and quality analysis
+    method: rule_based | vlm | manual
+
+    # [CONFIRMED] VLM only used for edge cases (~5–10% of samples)
+    # ~75–80%: rule-based trajectory × ego road intersection check
+    # ~10–15%:: Pose estimation for ambiguous cases
+    # ~5%: VLM (Gemini free tier or local Llama 3.2 Vision 11B)
+    #           → always provided trajectory context in prompt
+    #   ~5–10%:  manual gold standard for validation
+
+  # ─────────────────────────────────────────
+  # TRAJECTORY
+  # ─────────────────────────────────────────
+
+  trajectory:
+    # [CONFIRMED] Trajectory covers observation window + prediction horizon
+    # Total: 0.5s (observed) + 1.5s (future) = 2s
+
+    # [CONFIRMED] Coordinate frames — store both, use ego-relative for training
+    # World frame: GPS-aligned, for analysis and visualization
+    # Ego-relative: relative to ego vehicle at window_start, for model training and inference
+    #               (removes GPS drift, model generalizes better across locations)
+
+    frames:
+      - timestamp: str             # UTC timestamp of this LiDAR scan
+        position_world: [x, y, z] # meters, world/GPS-aligned frame
+        position_ego_rel: [x, y, z] # meters, relative to ego at window_start
+        in_observation: bool       # true if within 0.5s window; false = future
+        kalman_confidence: float   # residual from Kalman filter (lower = more reliable)
+        tracking_method: anchor | forward | backward
+        # anchor: from ZOD keyframe annotation (highest confidence)
+        # forward: propagated forward from keyframe via LiDAR tracking
+        # backward: propagated backward from keyframe via LiDAR tracking
+
+    # Trajectory generation pipeline:
+    # 1. Seed: keyframe 3D bounding box from object_detection.json
+    # 2. Track: LiDAR point cloud IoU / nearest-neighbor (frame-by-frame ~111ms)
+    # 3. Compensate: ego-motion via ego_motion.json (GNSS/IMU)
+    # 4. Smooth: Kalman Filter on full trajectory
+
+
+  # ─────────────────────────────────────────
+  # MULTIMODAL DATA (paths only, not embedded)
+  # ─────────────────────────────────────────
+
+  multimodal:
+
+    # [CONFIRMED] Camera — ~5 frames in observation window
+    camera_frames:
+      - timestamp: str
+        path: str                  # relative to data/raw/sequences/XXXXXX/
+
+    # [CONFIRMED] LiDAR — ~4 scans in observation window
+    # Each .npy file: [timestamp, x, y, z, intensity, diode_index]
+    # diode_index 0–127: VLS128 main, 128–143: left VLP16, 144–159: right VLP16
+    lidar_scans:
+      - timestamp: str
+        path: str                  # relative to data/raw/sequences/XXXXXX/
+
+    # [CONFIRMED] Radar — include path but optional for model use (low resolution, hard to isolate single pedestrian)
+    # Provides range_rate (Doppler velocity) — pedestrian moving toward/away
+    # Included for completeness; community can explore its utility
+    radar_path: str
+
+    # GNSS/IMU raw data: NOT included per sample
+    # Used internally in pipeline for ego-motion compensation only
+
+
+  # ─────────────────────────────────────────
+  # CONTEXT FEATURES
+  # ─────────────────────────────────────────
+  # Distilled from raw sensor data — ready to use as model input
+
+  context:
+    # [CONFIRMED] Ego vehicle state at window_start
+    ego_speed_ms: float            # m/s from vehicle data
+    ego_heading_deg: float         # degrees, from GNSS/IMU
+
+    # [CONFIRMED] Turn indicator — strong context for pedestrian decision-making
+    # (if ego is turning, pedestrian may hesitate to cross)
+    turn_indicator: none | left | right  # from vehicle data
+
+    # [PENDING] Brake pedal — indicates active vehicle-pedestrian negotiation (may be redundant with ego_speed)
+    brake_pedal_ratio: float       # 0.0 – 1.0
+
+    # [CONFIRMED] Pedestrian state at window_start (from annotation + tracking)
+    distance_to_ego_m: float       # meters, at window_start
+    distance_to_road_m: float      # meters to nearest ego road boundary point
+    occlusion: null | Light | Heavy       # all levels included
+
+
+  # ─────────────────────────────────────────
+  # METADATA
+  # ─────────────────────────────────────────
+
+  metadata:
+    # Geographic info (from LiDAR filename, e.g. "000007_quebec_2022-02-14...")
+    location: str                  # e.g. "quebec", "sweden", "germany"
+    collection_date: str           # YYYY-MM-DD
+
+    # Dataset split
+    # [PENDING] Split ratio — train/val/test -> must be at sequence level (not window level) to prevent data leakage between overlapping windows of same sequence
+    split: train | val | test
+
+
+    # Label quality flags
+    label_confidence_tier: high | medium | low
+    # high:   rule-based, clear crossing/not-crossing (distance clearly in/out)
+    # medium: rule-based, trajectory near road boundary (within 1m of threshold)
+    # low:    VLM-assisted or manual
+
+    is_in_gold_standard: bool      # true for manually validated subset (~5–10%)
+
+    # Multi-pedestrian flag
+    # [CONFIRMED] When multiple pedestrians are present -> generate one sample per pedestrian (all labeled)
+    num_pedestrians_in_scene: int
+    is_key_pedestrian: bool        # whether this is the primary pedestrian
+
+
+# ─────────────────────────────────────────
+# OUTPUT FORMAT
+# ─────────────────────────────────────────
+
+output_format:
+  # [CONFIRMED] Follow PIE/PSI convention for compatibility:
+  #   - One JSON file per sample
+  #
+  # [CONFIRMED] Addition over PIE/PSI: dataset-level Parquet index file
+  #   - One row per sample, containing all scalar fields (split, label, confidence, distance, occlusion, ego_speed, etc.)
+  #   - Enables fast filtering and slicing without touching per-sample JSONs; Generated at pipeline completion; regenerated if annotations change
+  #   - Example: df[df.split=="test"][df.label!="uncertain"]
+
+  per_sample: json                 # data/annotations/{sample_id}.json
+  raw_sensor_data: file_references # paths relative to data/raw/sequences/
+  dataset_index: parquet           # data/annotations/dataset_index.parquet
+
+
+# ─────────────────────────────────────────
+# DATASET-LEVEL STATISTICS (target)
+# ─────────────────────────────────────────
+
+dataset_stats:
+  # Estimated from 130 sequences with pedestrian + LiDAR available
+  # Rough estimate: ~10–15 valid windows per sequence after filtering
+  estimated_total_samples: "1,300 – 1,950"
+
+  # [PENDING] confirm split ratio
+  estimated_split:
+    train: "~70%"
+    val:   "~15%"
+    test:  "~15%"
+
+  # [PENDING] confirm target crossing ratio
+  # Real-world urban crossing rate: ~15–30% (ref: JAAD/PIE statistics)
+  target_crossing_ratio: "~20–30%"
+  # Note: may need to balance via subsampling not_crossing windows

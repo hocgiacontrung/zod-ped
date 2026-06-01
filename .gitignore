@@ -1,0 +1,42 @@
+# Dataset — never commit raw or processed data
+data/raw/
+data/processed/
+data/annotations/
+data/splits/*.parquet
+
+# Outputs
+outputs/
+*.log
+*.ckpt
+
+# Large file types
+*.npy
+*.hdf5
+*.h5
+*.parquet
+*.tar.gz
+*.zip
+
+# Credentials
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/settings.json
+.idea/
