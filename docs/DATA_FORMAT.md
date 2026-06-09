@@ -18,7 +18,7 @@ data/raw/sequences/XXXXXX/
 │   ├── lane_marking.json
 │   └── traffic_signs.json
 ├── lidar_velodyne/             ← .npy files named by UTC timestamp
-├── images_blur/                ← .jpg camera frames
+├── camera_front_blur/          ← .jpg camera frames
 ├── calibration.json            ← sensor extrinsics/intrinsics
 ├── ego_motion.json             ← vehicle poses over time
 ├── info.json
@@ -33,11 +33,19 @@ data/raw/sequences/XXXXXX/
 ```
 Parse timestamp: strip `.npy`, replace trailing `Z` with `+00:00`, use `datetime.fromisoformat()`.
 
-**Array columns:** `[timestamp, x, y, z, intensity, diode_index]`
-- `diode_index` 0–127: VLS128 main sensor
-- `diode_index` 128–143: left VLP16
-- `diode_index` 144–159: right VLP16
-- Coordinates in **sensor/ego frame** (meters)
+**Format:** structured numpy array (named fields, not positional columns). Load with:
+```python
+cloud = np.load("scan.npy")
+x, y, z = cloud["x"], cloud["y"], cloud["z"]   # NOT cloud[:, 1] etc.
+```
+
+**Fields:** `('x', 'y', 'z', 'timestamp', 'intensity', 'diode_index')`
+- `x`, `y`, `z`: float32, ego/sensor frame (metres). x forward, y left, z up.
+- `timestamp`: int64, **relative microsecond offset** from the scan's center time
+  (encoded in the filename). To get absolute UTC per point:
+  `abs_ts = filename_unix_ts + cloud["timestamp"] / 1e6`
+- `intensity`: uint8, 0–255
+- `diode_index`: uint8 — 1–127: VLS128 main sensor; 128–143: left VLP16; 144–159: right VLP16
 
 **Synchronization:** For each camera frame, find nearest LiDAR scan by timestamp.
 Max acceptable gap: **55ms**. Use `ego_motion.json` to compensate movement between frames.
@@ -72,15 +80,40 @@ Max acceptable gap: **55ms**. Use `ego_motion.json` to compensate movement betwe
 ```
 Filter pedestrians: `a["properties"]["class"] == "Pedestrian"`
 
+**Coordinate frame of `location_3d`:** **LiDAR sensor frame** (same as `.npy` point cloud
+coordinates), NOT the vehicle ego frame. Despite the ZOD docs saying "sensor/ego frame",
+these are meaningfully different due to the LiDAR mount transform (~1.75m above vehicle,
+slight rotation). Verified on seq 000007: projecting via `inv(cam_ext) @ lid_ext` puts
+centroids within ±35px of annotated 2D bbox centers.
+
+**Note:** Not all pedestrian annotations have a 3D box. Some are 2D-only (no `location_3d`,
+no size/orientation fields). Always guard: `"location_3d" in a["properties"]` before
+accessing any 3D field.
+
 ## ego_motion.json
 Contains vehicle poses over the full 20s sequence. Used for:
 - Getting the keyframe timestamp
 - Ego-motion compensation when transforming LiDAR points to world frame
 
+## ego_road.json
+Road polygon annotations. **Coordinate frame: image pixel space** (not ego/3D).
+Polygon vertices are (u, v) pixel coordinates in the front camera image (3848×2168).
+To check whether a pedestrian is on the road, project `location_3d` into image space
+first using the FC camera model, then test containment in the polygon.
+
 ## calibration.json
-Sensor extrinsic/intrinsic transforms. Required to verify LiDAR points land in
-3D bounding boxes. If axis-aligned box check returns 0 points, apply the
-LiDAR→annotation frame transform from this file before checking.
+Sensor extrinsic/intrinsic transforms. Top-level key is `"FC"` (front camera).
+Relevant sub-keys:
+- `intrinsics`: 3×4 matrix (Kannala fisheye)
+- `extrinsics`: 4×4 ego→camera transform
+- `lidar_extrinsics`: 4×4 LiDAR→camera transform
+- `distortion` / `undistortion`: Kannala distortion coefficients
+- `image_dimensions`: [3848, 2168]
+
+LiDAR points and `location_3d` are confirmed to be in the same **LiDAR sensor frame**
+(verified on seq 000007) — no extra transform needed between them.
+To project either into the image, use `T_cam_lidar = inv(extrinsics) @ lidar_extrinsics`.
+See `src/utils/projection.py`.
 
 ## pedestrian_sequences.json
 ```json

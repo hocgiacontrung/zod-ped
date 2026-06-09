@@ -3,15 +3,16 @@
 ## Pipeline Overview
 
 ```
-[pedestrian_sequences.json — 130 sequences with LiDAR]
+[pedestrian_sequences.json — sequences with LiDAR on disk]
         ↓
-[Step 1] Window Generation & Filtering
-  - Slice each sequence into overlapping 0.5s windows (stride 0.25s)
-  - Filter out windows where pedestrian is too far from ego road boundary
+[Step 1] Window Generation  (scripts/01_filter_sequences.py)
+  - Structural/data-availability filters only (see below)
+  - Slice each passing pedestrian into overlapping 0.5s windows (stride 0.25s)
+  - Record distance_to_ego_m and distance_to_road_m as metadata (not filters)
   - Output: data/processed/candidate_windows.json
 
         ↓
-[Step 2] Trajectory Generation
+[Step 2] Trajectory Generation  (scripts/02_generate_trajectories.py)
   - Seed: keyframe 3D box from object_detection.json
   - Track: LiDAR point cloud IoU / nearest-neighbor, forward + backward from keyframe
   - Compensate: ego-motion via ego_motion.json
@@ -19,7 +20,14 @@
   - Output: per-frame (x,y,z) trajectory for each pedestrian in world + ego-relative frames
 
         ↓
-[Step 3] Intent Labeling
+[Step 2.5] Proximity Filter  (scripts/02_5_filter_by_trajectory.py)
+  - Now that per-frame positions exist, apply position-based filters per window:
+      distance_to_ego_m ≤ 50.0   (at window midpoint, using tracked position)
+      distance_to_road_m ≤ 15.0  (at window midpoint, projected to ego_road polygon)
+  - Output: data/processed/candidate_windows_filtered.json
+
+        ↓
+[Step 3] Intent Labeling  (scripts/03_label_intent.py)
   - Rule-based (~75–80%): trajectory crosses ego road centerline within horizon?
   - Pose estimation (~10–15%): MediaPipe body orientation for ambiguous cases
   - VLM (~5%): Gemini 1.5 Flash (free tier) or Llama 3.2 Vision 11B (local, ~7GB VRAM)
@@ -36,13 +44,26 @@ prediction_horizons_s: [1.0, 1.5, 2.0]
 ```
 
 ## Filtering Thresholds
+
+**Step 1 — structural (data availability):**
 ```yaml
-max_distance_to_ego_m: 50.0
-max_distance_to_road_m: 15.0
-max_occlusion: Heavy          # no occlusion filtering; all included, flagged in metadata
-min_lidar_frames_in_window: 3 # out of ~4 expected
-require_lidar_detection: true
+require_3d_annotation: true        # skip 2D-only pedestrians (no location_3d)
+require_lidar_detection: true      # ≥1 LiDAR point in 3D box at keyframe; needed to seed tracker
+min_lidar_frames_in_window: 3      # out of ~4 expected; skip windows with missing scans
+max_occlusion: Heavy               # no occlusion filtering; all included, flagged in metadata
 ```
+
+**Step 2.5 — proximity (requires tracked trajectory):**
+```yaml
+max_distance_to_ego_m: 50.0        # at window midpoint using tracked position
+max_distance_to_road_m: 15.0       # at window midpoint, projected to ego_road polygon
+```
+
+**Rationale for split:** ZOD has a single keyframe annotation per sequence (center of 20s
+clip). Applying distance/road filters at Step 1 would use keyframe position as a proxy for
+all 79 windows per pedestrian, which is unreliable for windows far from the keyframe
+(pedestrian may have moved ~14m at walking speed). Position-based filters are deferred
+until Step 2.5 when per-frame tracked positions are available.
 
 ## Trajectory Tracking Detail
 1. **Seed** at keyframe (t=10s): 3D bounding box from annotation
