@@ -3,6 +3,10 @@
 Internship project at Intelligent Robotics Lab, Aalto University.
 Conda env: `zod-iac` | Server: `user20@aalto`
 
+## Working Preferences
+- Pipeline decisions are open to debate. If you (any session, human or AI) see a better approach,
+  challenge it — propose alternatives, state the trade-off, don't just follow the docs.
+
 ## Goal
 Build a multimodal pedestrian intent & trajectory prediction dataset on top of
 Zenseact Open Dataset (ZOD). Key novelty: synchronized camera + LiDAR + radar,
@@ -11,14 +15,15 @@ Schema approved. Now building the pipeline.
 
 ## Current Status (Week 2)
 - [x] 358 sequences with pedestrian annotations identified → `data/pedestrian_sequences.json`
-- [x] 8 sequences have LiDAR on disk (batch `lidar_velodyne_000000_000039`) → current working set
+- [x] All 358 pedestrian sequences now have LiDAR on disk (non-pedestrian LiDAR pruned via
+  `scripts/prune_lidar.py`; 1473 seq dirs total, 358 retain `lidar_velodyne/`) → full working set
 - [x] Dataset schema approved by supervisor → `docs/PIPELINE.md`
 - [x] Exploration notebook → `notebooks/01_explore_sequence.ipynb` (seq 000007)
 - [x] Projection utility → `src/utils/projection.py`
 - [x] Step 1 script → `scripts/01_filter_sequences.py` → `data/processed/candidate_windows.json`
 - [ ] **Next: Step 2 – Trajectory generation** (`scripts/02_generate_trajectories.py`)
-- [ ] Step 2.5 – Proximity filter (`scripts/02_5_filter_by_trajectory.py`)
-- [ ] Step 3 – Intent labeling (`scripts/03_label_intent.py`)
+- [ ] Step 3 – Proximity filter (`scripts/03_filter_by_trajectory.py`)
+- [ ] Step 4 – Intent labeling (`scripts/04_label_intent.py`)
 
 ## Key Findings from Exploration (seq 000007)
 - **`location_3d` is in the LiDAR sensor frame**, not the vehicle ego frame — despite ZOD
@@ -33,11 +38,26 @@ Schema approved. Now building the pipeline.
 - **Nearest LiDAR scan gap**: 37.4ms for seq 000007 — well within 55ms limit.
 
 ## Step 1 Output: candidate_windows.json
-Working set results (8 sequences, 42 total pedestrians):
-- 1 skipped (2D-only), 5 skipped (no LiDAR detection at keyframe)
-- 36 pedestrians → 2,844 candidate windows
+Full-set results (358 sequences, 2,159 total pedestrians):
+- 296 skipped (2D-only), 87 skipped (no LiDAR detection at keyframe)
+- 1,776 pedestrians → **140,072 candidate windows**
+- Output written **compact** (no indent) → 241 MB; load with a streaming parser in Step 2
 - distance_to_ego_m and distance_to_road_m stored as metadata only — NOT filtered here
-- Proximity filtering deferred to Step 2.5 (needs tracked positions)
+- Proximity filtering deferred to Step 3 (needs tracked positions)
+- Note: `MIN_LIDAR_IN_WINDOW=3` guard never fires in practice (~5 scans/0.5s window)
+- Run: ~19s for all 358; continue-on-error with a `failures` list in the output JSON
+
+## Step 2 Approach (locked — see docs/PIPELINE.md)
+- **Unit = pedestrian, not window**: track each of the ~1,776 keyframe-annotated peds once over
+  the full 20s clip. Step 2 does NOT load the 241 MB candidate_windows.json.
+- **Compensate-before-associate**: lift each scan to world frame via interpolated ego pose,
+  then associate. **Gated centroid** (fixed keyframe box, Kalman-predicted gate), NOT box-IoU.
+- **Kalman**: online (gate) + RTS backward smooth. Coast on miss; mark `in_observation=false`.
+- Output: per-ped `data/processed/trajectories/{seq_id}_{pedestrian_id}.json` (world frame).
+  `position_ego_rel` is per-window → added at sample assembly, not Step 2.
+- **Detectors** (PointPillars 3D, YOLO+ByteTrack 2D): first used to validate our tracks
+  (agreement metric, not accuracy — no per-frame GT). Could later re-acquire coasted tracks or
+  detect unannotated peds (context only, no labels); both deferred until the tracker is built.
 
 ## Key Constraints
 - LiDAR files named by UTC timestamp, not frame index — always match by timestamp
@@ -56,8 +76,8 @@ zod-ped/
 ├── data/
 │   ├── raw/sequences/XXXXXX/     ← ZOD data (annotations, lidar, images, etc.)
 │   ├── processed/                ← pipeline outputs
-│   │   └── candidate_windows.json   ← Step 1 output (2,844 windows)
-│   ├── annotations/              ← generated pseudo-labels (Step 3 output)
+│   │   └── candidate_windows.json   ← Step 1 output (140,072 windows, 241 MB compact)
+│   ├── annotations/              ← generated pseudo-labels (Step 4 output)
 │   └── pedestrian_sequences.json    ← 358 sequences with pedestrian annotations
 ├── src/
 │   ├── dataset/                  ← ZOD loading & data structures
@@ -66,10 +86,11 @@ zod-ped/
 │   │   └── projection.py         ← Kannala projection, road polygon check
 │   └── visualization/
 ├── scripts/
+│   ├── prune_lidar.py            ← delete lidar_velodyne/ for non-pedestrian seqs (run per batch)
 │   ├── 01_filter_sequences.py    ← Step 1: window generation
 │   ├── 02_generate_trajectories.py   ← Step 2: TODO
-│   ├── 02_5_filter_by_trajectory.py  ← Step 2.5: TODO
-│   └── 03_label_intent.py            ← Step 3: TODO
+│   ├── 03_filter_by_trajectory.py    ← Step 3: TODO
+│   └── 04_label_intent.py            ← Step 4: TODO
 ├── notebooks/
 │   └── 01_explore_sequence.ipynb    ← seq 000007 exploration (verified)
 ├── configs/                      ← pipeline parameters (YAML)

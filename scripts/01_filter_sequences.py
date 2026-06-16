@@ -75,11 +75,6 @@ def nearest_lidar(files: list[Path], target_ts: float) -> tuple[Path | None, flo
     return files[idx], abs(timestamps[idx] - target_ts)
 
 
-def lidar_in_window(files: list[Path], window_start: float, window_end: float) -> list[Path]:
-    return [f for f in files
-            if window_start <= lidar_ts_from_filename(f.name) <= window_end]
-
-
 def points_in_box(pts_xyz: np.ndarray, loc: list, qw: float, qx: float,
                   qy: float, qz: float, length: float, width: float,
                   height: float) -> int:
@@ -213,69 +208,76 @@ def process_sequence(seq_id: str, raw_dir: Path) -> tuple[list, dict]:
 
     stats["peds_passing_keyframe"] = len(passing_peds)
 
-    # --- window generation -------------------------------------------------
-    window_starts = np.arange(0.0, duration_s - WINDOW_S + 1e-6, STRIDE_S)
+    # --- window scaffolding (identical across pedestrians) -----------------
+    # A window's contents depend only on time, not on which pedestrian, so
+    # build each window once per sequence and reuse it for every passing ped.
+    # Timestamps are parsed once up front to avoid re-scanning filenames.
+    lidar_ts  = np.array([lidar_ts_from_filename(f.name) for f in lidar_files])
 
+    cam_dir   = seq_dir / "camera_front_blur"
+    cam_files = sorted(cam_dir.glob("*.jpg")) if cam_dir.exists() else []
+    cam_ts    = np.array([parse_zod_ts(f.stem.split("_", 2)[2]) for f in cam_files])
+
+    window_offsets = np.arange(0.0, duration_s - WINDOW_S + 1e-6, STRIDE_S)
+    valid_windows: list[dict] = []
+    n_dropped_min_scans = 0
+
+    for ws_offset in window_offsets:
+        w_start_ts = start_ts + ws_offset
+        w_end_ts   = w_start_ts + WINDOW_S
+
+        w_lidar = [lidar_files[i]
+                   for i in np.nonzero((lidar_ts >= w_start_ts) & (lidar_ts <= w_end_ts))[0]]
+        if len(w_lidar) < MIN_LIDAR_IN_WINDOW:
+            n_dropped_min_scans += 1
+            continue
+
+        cam_idx = np.nonzero((cam_ts >= w_start_ts) & (cam_ts <= w_end_ts))[0] if len(cam_ts) else []
+
+        valid_windows.append({
+            "w_start_ms": int(round(ws_offset * 1000)),
+            "start_str": datetime.datetime.fromtimestamp(
+                w_start_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "end_str": datetime.datetime.fromtimestamp(
+                w_end_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "ego_speed_ms": round(ego_speed_at(ego_motion, w_start_ts), 2),
+            "lidar_scans": [
+                {"timestamp": f.stem.split("_", 2)[2],
+                 "path": str(f.relative_to(raw_dir.parent))}
+                for f in w_lidar
+            ],
+            "camera_frames": [
+                {"timestamp": cam_files[i].stem.split("_", 2)[2],
+                 "path": str(cam_files[i].relative_to(raw_dir.parent))}
+                for i in cam_idx
+            ],
+        })
+
+    n_peds = len(passing_peds)
+    stats["windows_generated"]          = len(window_offsets) * n_peds
+    stats["windows_filtered_min_scans"] = n_dropped_min_scans * n_peds
+
+    # --- emit one record per (passing pedestrian, valid window) ------------
     for ped_info in passing_peds:
-        ped = ped_info["ped"]
-        pr  = ped["properties"]
+        pr = ped_info["ped"]["properties"]
 
-        for ws_offset in window_starts:
-            stats["windows_generated"] += 1
-
-            w_start_ts = start_ts + ws_offset
-            w_end_ts   = w_start_ts + WINDOW_S
-
-            w_lidar = lidar_in_window(lidar_files, w_start_ts, w_end_ts)
-            if len(w_lidar) < MIN_LIDAR_IN_WINDOW:
-                stats["windows_filtered_min_scans"] += 1
-                continue
-
-            w_start_str = datetime.datetime.fromtimestamp(
-                w_start_ts, tz=datetime.timezone.utc
-            ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            w_end_str = datetime.datetime.fromtimestamp(
-                w_end_ts, tz=datetime.timezone.utc
-            ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-            w_start_ms = int(round(ws_offset * 1000))
-            sample_id = f"{seq_id}_{pr['annotation_uuid']}_{w_start_ms:06d}"
-
-            # camera frames in window
-            cam_dir = seq_dir / "camera_front_blur"
-            cam_frames = []
-            if cam_dir.exists():
-                for jpg in sorted(cam_dir.glob("*.jpg")):
-                    jpg_ts_str = jpg.stem.split("_", 2)[2]
-                    jpg_ts = parse_zod_ts(jpg_ts_str)
-                    if w_start_ts <= jpg_ts <= w_end_ts:
-                        cam_frames.append({
-                            "timestamp": jpg_ts_str,
-                            "path": str(jpg.relative_to(raw_dir.parent)),
-                        })
-
+        for w in valid_windows:
             candidates.append({
-                "sample_id": sample_id,
+                "sample_id": f"{seq_id}_{pr['annotation_uuid']}_{w['w_start_ms']:06d}",
                 "sequence_id": seq_id,
                 "pedestrian_id": pr["annotation_uuid"],
-                "window_start_timestamp": w_start_str,
-                "window_end_timestamp":   w_end_str,
+                "window_start_timestamp": w["start_str"],
+                "window_end_timestamp":   w["end_str"],
                 "keyframe_timestamp":     info["keyframe_time"],
                 "context": {
                     "distance_to_ego_m":  round(ped_info["dist_ego_m"], 2),
                     "distance_to_road_m": round(ped_info["dist_road_m"], 2),
                     "occlusion":          pr.get("occlusion_ratio"),
-                    "ego_speed_ms":       round(ego_speed_at(ego_motion, w_start_ts), 2),
+                    "ego_speed_ms":       w["ego_speed_ms"],
                 },
                 "multimodal": {
-                    "lidar_scans": [
-                        {
-                            "timestamp": f.stem.split("_", 2)[2],
-                            "path": str(f.relative_to(raw_dir.parent)),
-                        }
-                        for f in w_lidar
-                    ],
-                    "camera_frames": cam_frames,
+                    "lidar_scans":   w["lidar_scans"],
+                    "camera_frames": w["camera_frames"],
                 },
             })
             stats["candidates"] += 1
@@ -335,6 +337,7 @@ def main() -> None:
 
     all_candidates: list[dict] = []
     all_stats: list[dict] = []
+    failures: list[dict] = []
 
     for entry in working_set:
         seq_id = entry["seq_id"]
@@ -347,9 +350,9 @@ def main() -> None:
                 f"{stats['peds_passing_keyframe']}/{stats['peds_total']} peds pass  "
                 f"→ {stats['candidates']} windows"
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — keep the batch going; record and continue
             print(f"ERROR: {exc}")
-            raise
+            failures.append({"seq_id": seq_id, "error": repr(exc)})
 
     # write output
     output = {
@@ -363,6 +366,7 @@ def main() -> None:
         },
         "summary": {
             "sequences_processed":        len(all_stats),
+            "sequences_failed":           len(failures),
             "total_peds":                 sum(s["peds_total"] for s in all_stats),
             "peds_2d_only":               sum(s["peds_2d_only"] for s in all_stats),
             "filtered_no_lidar":          sum(s["filtered_no_lidar_detection"] for s in all_stats),
@@ -371,15 +375,18 @@ def main() -> None:
             "windows_filtered_min_scans": sum(s["windows_filtered_min_scans"] for s in all_stats),
             "total_candidates":           len(all_candidates),
         },
+        "failures": failures,
         "per_sequence": all_stats,
         "candidates": all_candidates,
     }
 
-    out_path.write_text(json.dumps(output, indent=2))
+    out_path.write_text(json.dumps(output, separators=(",", ":")))
     print()
     print("=" * 60)
     s = output["summary"]
     print(f"Sequences processed   : {s['sequences_processed']}")
+    if s["sequences_failed"]:
+        print(f"Sequences FAILED      : {s['sequences_failed']}  ({', '.join(f['seq_id'] for f in failures)})")
     print(f"Total pedestrians     : {s['total_peds']}")
     print(f"  2D-only (skipped)   : {s['peds_2d_only']}")
     print(f"  No LiDAR detection  : {s['filtered_no_lidar']}")

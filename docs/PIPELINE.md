@@ -1,5 +1,9 @@
 # Pipeline Design & Schema
 
+> These are working decisions, not settled doctrine. If you (human or AI, any session) see a
+> better approach, push back — alternatives and disagreement are welcome. State the trade-off and
+> make the case; don't silently follow the doc if something looks wrong.
+
 ## Pipeline Overview
 
 ```
@@ -13,21 +17,33 @@
 
         ↓
 [Step 2] Trajectory Generation  (scripts/02_generate_trajectories.py)
-  - Seed: keyframe 3D box from object_detection.json
-  - Track: LiDAR point cloud IoU / nearest-neighbor, forward + backward from keyframe
-  - Compensate: ego-motion via ego_motion.json
-  - Smooth: Kalman Filter
-  - Output: per-frame (x,y,z) trajectory for each pedestrian in world + ego-relative frames
+  - Unit of work: the PEDESTRIAN (one track per keyframe-annotated pedestrian),
+    NOT the window. ~1,776 tracks vs 140k windows → does NOT load candidate_windows.json;
+    derives the distinct (seq, ped) set and tracks each once over the full 20s clip.
+  - Seed: keyframe 3D box from object_detection.json (location_3d is in the LiDAR frame)
+  - Compensate FIRST, then associate: lift each scan's points to a single world frame
+    [ pose(t) @ T_ego_lidar @ p_lidar ], interpolating the ego pose at scan time (SLERP+lerp),
+    so ego motion is never mistaken for pedestrian motion during association.
+  - Track: forward + backward from keyframe via GATED CENTROID — fixed keyframe box size,
+    gate around the Kalman-predicted position, centroid of enclosed world points = measurement.
+  - Smooth: constant-velocity Kalman (online, used for the gate) + RTS backward pass;
+    store innovation residual as kalman_confidence.
+  - Coast on miss: predict-only when 0 points in the gate (occlusion/range); mark
+    in_observation=false; terminate the track after N consecutive misses.
+  - Output: per-pedestrian world-frame trajectory →
+    data/processed/trajectories/{seq_id}_{pedestrian_id}.json
+  - NOTE: position_ego_rel is per-window (relative to ego pose at that window's start),
+    so it is NOT produced here — it is added during sample assembly.
 
         ↓
-[Step 2.5] Proximity Filter  (scripts/02_5_filter_by_trajectory.py)
+[Step 3] Proximity Filter  (scripts/03_filter_by_trajectory.py)
   - Now that per-frame positions exist, apply position-based filters per window:
       distance_to_ego_m ≤ 50.0   (at window midpoint, using tracked position)
       distance_to_road_m ≤ 15.0  (at window midpoint, projected to ego_road polygon)
   - Output: data/processed/candidate_windows_filtered.json
 
         ↓
-[Step 3] Intent Labeling  (scripts/03_label_intent.py)
+[Step 4] Intent Labeling  (scripts/04_label_intent.py)
   - Rule-based (~75–80%): trajectory crosses ego road centerline within horizon?
   - Pose estimation (~10–15%): MediaPipe body orientation for ambiguous cases
   - VLM (~5%): Gemini 1.5 Flash (free tier) or Llama 3.2 Vision 11B (local, ~7GB VRAM)
@@ -53,7 +69,7 @@ min_lidar_frames_in_window: 3      # out of ~4 expected; skip windows with missi
 max_occlusion: Heavy               # no occlusion filtering; all included, flagged in metadata
 ```
 
-**Step 2.5 — proximity (requires tracked trajectory):**
+**Step 3 — proximity (requires tracked trajectory):**
 ```yaml
 max_distance_to_ego_m: 50.0        # at window midpoint using tracked position
 max_distance_to_road_m: 15.0       # at window midpoint, projected to ego_road polygon
@@ -63,16 +79,45 @@ max_distance_to_road_m: 15.0       # at window midpoint, projected to ego_road p
 clip). Applying distance/road filters at Step 1 would use keyframe position as a proxy for
 all 79 windows per pedestrian, which is unreliable for windows far from the keyframe
 (pedestrian may have moved ~14m at walking speed). Position-based filters are deferred
-until Step 2.5 when per-frame tracked positions are available.
+until Step 3 when per-frame tracked positions are available.
 
 ## Trajectory Tracking Detail
-1. **Seed** at keyframe (t=10s): 3D bounding box from annotation
-2. **Forward** (t+1 … t=20s): previous box → next LiDAR scan → highest IoU or nearest centroid cluster → update box
-3. **Backward** (t-1 … t=0s): same logic
-4. **Ego-motion compensation**: transform all positions to world frame using ego_motion.json
-5. **Kalman filter**: smooth after full trajectory is generated; store innovation residual as `kalman_confidence`
+Frame chain per scan: `p_world = pose(t) @ T_ego_lidar @ p_lidar`, where
+`T_ego_lidar = calib["FC"]["lidar_extrinsics"]` and `pose(t)` is interpolated from
+`ego_motion["poses"]` (T[world←ego], origin = ego at clip start) at the scan timestamp.
 
-Pedestrian moves <15cm between LiDAR frames (~111ms) → small search radius is sufficient.
+1. **Seed** at keyframe (t≈10s): 3D box from annotation; centroid `location_3d` lifted to world.
+2. **Compensate first**: lift every candidate scan's points to the world frame *before*
+   association, so ego motion is removed and the pedestrian moves smoothly.
+3. **Predict** the next position with a constant-velocity Kalman filter.
+4. **Gate + measure**: keep world points inside the predicted (fixed-size) box + margin;
+   the centroid is the measurement. **Forward** (keyframe→t=20s) then **Backward** (keyframe→t=0s).
+5. **Update** Kalman; store innovation residual as `kalman_confidence`. **Coast** (predict-only,
+   `in_observation=false`) when the gate is empty; terminate after N consecutive misses.
+6. **Smooth**: RTS backward pass over the completed track.
+
+Design choices (debatable — see top of doc): **gated centroid** over 3D-box IoU (pedestrians are
+only a handful of points at range — IoU is unstable); **compensate-before-associate** (PIPELINE
+originally listed compensation last); **online gate + RTS smooth** rather than smooth-only.
+Pedestrian moves <15cm between LiDAR frames (~111ms) → a small gate radius suffices.
+
+## Detectors: validation now, active roles later
+No per-frame ground truth beyond the keyframe → off-the-shelf detectors first serve to
+cross-check our tracks. **Agreement metric, NOT accuracy** (detectors are themselves weak on
+pedestrians at range).
+- **3D — PointPillars**: detect on a sample of scans; compare boxes vs our tracked centroids.
+- **2D — YOLO + ByteTrack**: project 3D track → camera frame (`projection.py`) for a per-frame
+  box; compare vs an independent 2D track.
+
+Later the same detectors can do real work, not just QA: **re-acquire a coasted track** (add-on
+inside Step 2), or **detect non-keyframe pedestrians** (unlabeled social context only — no
+intent, no identity, so they do NOT grow the labeled set). Both deferred until the core tracker
+exists and we've measured how often it loses the pedestrian.
+
+## Known Limitation — keyframe-only annotation
+ZOD annotates one keyframe per 20s clip, so a pedestrian present only before/after it is never
+annotated and cannot become a labeled sample (no intent, no identity). Out of scope for the
+labeled set; state this in the paper.
 
 ## Sample Schema (key fields)
 
@@ -96,12 +141,16 @@ intent:
     p_uncertain: float
 
 trajectory:
+  # Step 2 emits per-PEDESTRIAN world-frame tracks at trajectories/{seq}_{ped}.json.
+  # position_ego_rel is added per-window during sample assembly (not by Step 2).
   frames:
     - timestamp: str
       position_world: [x, y, z]
       position_ego_rel: [x, y, z]   # relative to ego pose at window_start; use for training
-      in_observation: bool
-      kalman_confidence: float
+      in_observation: bool          # false when coasting (gate empty)
+      num_lidar_points: int         # points in gate this scan (-1 = coasted, no measurement)
+      tracking_lost: bool           # true while coasting past the last good measurement
+      kalman_confidence: float      # from innovation residual; 0.0 when coasted
       tracking_method: anchor | forward | backward
 
 multimodal:
