@@ -47,7 +47,7 @@ Full-set results (358 sequences, 2,159 total pedestrians):
 - Note: `MIN_LIDAR_IN_WINDOW=3` guard never fires in practice (~5 scans/0.5s window)
 - Run: ~19s for all 358; continue-on-error with a `failures` list in the output JSON
 
-## Step 2 Approach (locked — see docs/PIPELINE.md)
+## Step 2 Approach (see docs/PIPELINE.md)
 - **Unit = pedestrian, not window**: track each of the ~1,776 keyframe-annotated peds once over
   the full 20s clip. Step 2 does NOT load the 241 MB candidate_windows.json.
 - **Compensate-before-associate**: lift each scan to world frame via interpolated ego pose,
