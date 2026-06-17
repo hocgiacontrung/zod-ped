@@ -21,7 +21,9 @@ Schema approved. Now building the pipeline.
 - [x] Exploration notebook → `notebooks/01_explore_sequence.ipynb` (seq 000007)
 - [x] Projection utility → `src/utils/projection.py`
 - [x] Step 1 script → `scripts/01_filter_sequences.py` → `data/processed/candidate_windows.json`
-- [ ] **Next: Step 2 – Trajectory generation** (`scripts/02_generate_trajectories.py`)
+- [ ] **Next: Step 2 – Trajectory generation** (`scripts/02_generate_trajectories.py`) —
+  detector-as-measurement architecture (see below). Two bring-up gates first:
+  (1) world-frame transform validation, (2) detector recall vs the 1,776 keyframe boxes.
 - [ ] Step 3 – Proximity filter (`scripts/03_filter_by_trajectory.py`)
 - [ ] Step 4 – Intent labeling (`scripts/04_label_intent.py`)
 
@@ -48,16 +50,27 @@ Full-set results (358 sequences, 2,159 total pedestrians):
 - Run: ~19s for all 358; continue-on-error with a `failures` list in the output JSON
 
 ## Step 2 Approach (see docs/PIPELINE.md)
-- **Unit = pedestrian, not window**: track each of the ~1,776 keyframe-annotated peds once over
-  the full 20s clip. Step 2 does NOT load the 241 MB candidate_windows.json.
-- **Compensate-before-associate**: lift each scan to world frame via interpolated ego pose,
-  then associate. **Gated centroid** (fixed keyframe box, Kalman-predicted gate), NOT box-IoU.
-- **Kalman**: online (gate) + RTS backward smooth. Coast on miss; mark `in_observation=false`.
+**Architecture: detector-as-measurement + KF/RTS-as-linker.** Decided 2026-06-17 over the earlier
+gated-centroid design (CV model lags at stop/start — the crossing decision — and centroid is
+surface-biased). Going straight to the detector architecture; the gated-centroid **full run was
+dropped** (kept only as a coast fallback). See [[pipeline-status]].
+- **Unit = pedestrian, not window**: track each ped once over the full 20s clip. Step 2 does NOT
+  load the 241 MB candidate_windows.json.
+- **3D detector (PointPillars / CenterPoint) = per-scan measurement** — localizes independently
+  each frame, so stop/start is captured by detection, not invented by a motion model.
+- **KF/RTS = linker**: constant-velocity Kalman associates detections (gate) + coasts gaps; RTS
+  backward smooth. The linker machinery is reused verbatim from `src/labeling/tracker.py`; only
+  the measurement source changed (gated centroid → detector box). Coast on miss → `in_observation=false`.
+- **Compensate-before-associate**: lift each scan to world frame via interpolated ego pose first.
+- **Two tiers**: GOLD = keyframe-anchored peds (verified box+identity); SILVER = detector-found
+  peds (flagged `label_confidence_tier=low`, `is_in_gold_standard=false`) — grows the set without
+  contaminating the GOLD benchmark.
+- **2D — YOLO+ByteTrack+SAM**: appearance features (crops, body orientation, occlusion) for intent
+  labeling + independent cross-check (agreement metric, not accuracy — no per-frame GT).
+- **Bring-up gates (do first):** (1) world-frame transform validation (static pole stays pinned);
+  (2) detector recall vs the 1,776 keyframe boxes (go/no-go for detector-as-measurement).
 - Output: per-ped `data/processed/trajectories/{seq_id}_{pedestrian_id}.json` (world frame).
   `position_ego_rel` is per-window → added at sample assembly, not Step 2.
-- **Detectors** (PointPillars 3D, YOLO+ByteTrack 2D): first used to validate our tracks
-  (agreement metric, not accuracy — no per-frame GT). Could later re-acquire coasted tracks or
-  detect unannotated peds (context only, no labels); both deferred until the tracker is built.
 
 ## Key Constraints
 - LiDAR files named by UTC timestamp, not frame index — always match by timestamp

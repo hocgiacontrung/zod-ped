@@ -7,7 +7,7 @@ Reads:  data/pedestrian_sequences.json
 Writes: data/processed/candidate_windows.json
 
 Structural/data-availability filters only (position-based filters are deferred to
-Step 2.5, after trajectories are tracked):
+Step 3, after trajectories are tracked):
   1. Skip 2D-only pedestrians (no location_3d → can't seed the tracker).
   2. Skip pedestrians with no LiDAR detection at keyframe (≥1 point in 3D box
      within 55ms; needed as tracking seed).
@@ -15,7 +15,7 @@ Step 2.5, after trajectories are tracked):
 
 distance_to_ego_m and distance_to_road_m are recorded as context metadata using
 the keyframe position, but are NOT used to filter. They will be recomputed per
-window at Step 2.5 using tracked positions.
+window at Step 3 using tracked positions.
 
 Output: list of dicts; one entry per (pedestrian, window) pair.
 """
@@ -46,7 +46,7 @@ STRIDE_S             = 0.25
 MIN_LIDAR_IN_WINDOW  = 3       # minimum LiDAR scans per window
 
 # NOTE: MAX_DIST_EGO_M and MAX_DIST_ROAD_M are intentionally absent here.
-# They are applied at Step 2.5 using per-window tracked positions.
+# They are applied at Step 3 using per-window tracked positions.
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +391,7 @@ def main() -> None:
     print(f"  2D-only (skipped)   : {s['peds_2d_only']}")
     print(f"  No LiDAR detection  : {s['filtered_no_lidar']}")
     print(f"  Passing keyframe    : {s['peds_passing_keyframe']}")
-    print(f"  (distance_to_ego / distance_to_road recorded as metadata; filtered at Step 2.5)")
+    print(f"  (distance_to_ego / distance_to_road recorded as metadata; filtered at Step 3)")
     print(f"Windows generated     : {s['windows_generated']}")
     print(f"  Filtered <{MIN_LIDAR_IN_WINDOW} scans  : {s['windows_filtered_min_scans']}")
     print(f"Candidate windows     : {s['total_candidates']}")

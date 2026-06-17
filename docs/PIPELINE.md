@@ -1,6 +1,6 @@
 # Pipeline Design & Schema
 
-> These are working decisions, not settled doctrine. If you (human or AI, any session) see a
+> These are working decisions, not settled doctrine. If you see a
 > better approach, push back — alternatives and disagreement are welcome. State the trade-off and
 > make the case; don't silently follow the doc if something looks wrong.
 
@@ -17,23 +17,35 @@
 
         ↓
 [Step 2] Trajectory Generation  (scripts/02_generate_trajectories.py)
-  - Unit of work: the PEDESTRIAN (one track per keyframe-annotated pedestrian),
-    NOT the window. ~1,776 tracks vs 140k windows → does NOT load candidate_windows.json;
-    derives the distinct (seq, ped) set and tracks each once over the full 20s clip.
-  - Seed: keyframe 3D box from object_detection.json (location_3d is in the LiDAR frame)
-  - Compensate FIRST, then associate: lift each scan's points to a single world frame
+  - Unit of work: the PEDESTRIAN (one track per pedestrian), NOT the window.
+    Does NOT load candidate_windows.json; derives the (seq, ped) set and tracks each
+    once over the full 20s clip.
+  - Architecture: DETECTOR-AS-MEASUREMENT + KALMAN/RTS-AS-LINKER.
+      * 3D detector (PointPillars / CenterPoint) localizes pedestrians per scan — the
+        per-frame box is the measurement (independent of any motion model, so stop/start
+        is captured by detection, not invented by the filter).
+      * The KF/RTS linker (constant-velocity Kalman + RTS smoother) associates detections
+        across scans, coasts through gaps, and smooths — it links boxes into a track but is
+        NO LONGER the source of position during normal tracking.
+      * 2D detector (YOLO + ByteTrack, SAM masks) runs on the camera stream for appearance
+        features (crops, body orientation, occlusion) and as an independent cross-check.
+  - Compensate FIRST: lift each scan's points to a single world frame
     [ pose(t) @ T_ego_lidar @ p_lidar ], interpolating the ego pose at scan time (SLERP+lerp),
-    so ego motion is never mistaken for pedestrian motion during association.
-  - Track: forward + backward from keyframe via GATED CENTROID — fixed keyframe box size,
-    gate around the Kalman-predicted position, centroid of enclosed world points = measurement.
-  - Smooth: constant-velocity Kalman (online, used for the gate) + RTS backward pass;
-    store innovation residual as kalman_confidence.
-  - Coast on miss: predict-only when 0 points in the gate (occlusion/range); mark
-    in_observation=false; terminate the track after N consecutive misses.
+    so ego motion is never mistaken for pedestrian motion. Shared by detector and linker.
+  - Two-tier output (see "Two-tier labels" below):
+      * GOLD — keyframe-annotated peds (verified ZOD identity + 3D box). Track is anchored
+        on the keyframe box; the detector measurements are validated against it.
+      * SILVER — detector-found peds with no keyframe annotation. Seeded from the first
+        confident detection; flagged label_confidence_tier=low / is_in_gold_standard=false.
+  - Coast on miss: predict-only when the detector returns nothing in the gate
+    (occlusion/range); mark in_observation=false; terminate after N consecutive misses.
   - Output: per-pedestrian world-frame trajectory →
     data/processed/trajectories/{seq_id}_{pedestrian_id}.json
   - NOTE: position_ego_rel is per-window (relative to ego pose at that window's start),
     so it is NOT produced here — it is added during sample assembly.
+  - Bring-up gates (run BEFORE building the MOT — see "Step 2 Bring-up" below):
+      (1) world-frame transform validation (static object stays fixed in world frame);
+      (2) detector recall vs the 1,776 keyframe boxes (go/no-go for detector-as-measurement).
 
         ↓
 [Step 3] Proximity Filter  (scripts/03_filter_by_trajectory.py)
@@ -86,38 +98,63 @@ Frame chain per scan: `p_world = pose(t) @ T_ego_lidar @ p_lidar`, where
 `T_ego_lidar = calib["FC"]["lidar_extrinsics"]` and `pose(t)` is interpolated from
 `ego_motion["poses"]` (T[world←ego], origin = ego at clip start) at the scan timestamp.
 
-1. **Seed** at keyframe (t≈10s): 3D box from annotation; centroid `location_3d` lifted to world.
-2. **Compensate first**: lift every candidate scan's points to the world frame *before*
+1. **Detect** pedestrians per scan with the 3D detector (PointPillars / CenterPoint). The
+   detector box is the **measurement** — it localizes independently each frame, so stop/start
+   is captured by detection, not by a motion model.
+2. **Compensate first**: lift every scan's points (and detections) to the world frame *before*
    association, so ego motion is removed and the pedestrian moves smoothly.
-3. **Predict** the next position with a constant-velocity Kalman filter.
-4. **Gate + measure**: keep world points inside the predicted (fixed-size) box + margin;
-   the centroid is the measurement. **Forward** (keyframe→t=20s) then **Backward** (keyframe→t=0s).
+3. **Predict** the next position with a constant-velocity Kalman filter — used to **associate**
+   (gate the next detection) and to **coast**, not as the source of position.
+4. **Associate**: match the detection inside the predicted gate to the track. GOLD tracks are
+   seeded/anchored on the keyframe box (t≈10s, `location_3d` lifted to world); SILVER tracks are
+   seeded on the first confident detection. Run **forward** and **backward** from the seed.
 5. **Update** Kalman; store innovation residual as `kalman_confidence`. **Coast** (predict-only,
-   `in_observation=false`) when the gate is empty; terminate after N consecutive misses.
+   `in_observation=false`) when no detection falls in the gate; terminate after N consecutive misses.
 6. **Smooth**: RTS backward pass over the completed track.
 
-Design choices (debatable — see top of doc): **gated centroid** over 3D-box IoU (pedestrians are
-only a handful of points at range — IoU is unstable); **compensate-before-associate** (PIPELINE
-originally listed compensation last); **online gate + RTS smooth** rather than smooth-only.
-Pedestrian moves <15cm between LiDAR frames (~111ms) → a small gate radius suffices.
+Design choices (debatable — see top of doc): **detector-as-measurement + KF/RTS-as-linker**
+(a learned detector localizes each frame independently, fixing the constant-velocity model's lag
+at the crossing decision — exactly the moments intent labeling keys off); **compensate-before-
+associate**; **online associate + RTS smooth** rather than smooth-only. Pedestrian moves <15cm
+between LiDAR frames (~111ms) → a small association gate suffices.
 
-## Detectors: validation now, active roles later
-No per-frame ground truth beyond the keyframe → off-the-shelf detectors first serve to
-cross-check our tracks. **Agreement metric, NOT accuracy** (detectors are themselves weak on
-pedestrians at range).
-- **3D — PointPillars**: detect on a sample of scans; compare boxes vs our tracked centroids.
-- **2D — YOLO + ByteTrack**: project 3D track → camera frame (`projection.py`) for a per-frame
-  box; compare vs an independent 2D track.
+> **Considered & set aside — gated-centroid tracker.** An earlier model-based design used a
+> constant-velocity Kalman gate whose centroid-of-enclosed-points was the measurement (no
+> detector). Rejected as the primary tracker because the CV model invents position and lags at
+> stop/start, and the centroid is biased toward the LiDAR-facing surface. The KF/RTS *linker*
+> from that design is reused verbatim — only the measurement source changed (centroid → detector
+> box). The gated-centroid measurement survives only as a **coast fallback** when the detector is
+> empty. Implementation kept in `src/labeling/tracker.py`; the full gated-centroid run was NOT
+> executed.
 
-Later the same detectors can do real work, not just QA: **re-acquire a coasted track** (add-on
-inside Step 2), or **detect non-keyframe pedestrians** (unlabeled social context only — no
-intent, no identity, so they do NOT grow the labeled set). Both deferred until the core tracker
-exists and we've measured how often it loses the pedestrian.
+## Step 2 Bring-up (gates before building the MOT)
+The detector pivot rests on two cheap, decisive experiments — both part of standing up the
+detector, NOT a separate baseline phase:
+1. **World-frame transform validation.** Track a known-static object that has `location_3d`
+   (e.g. a `TrafficGuide`/`SnowMarker` pole) through the compensate-first chain; it must stay
+   **pinned** in world coordinates. Validates pose interpolation + extrinsics for BOTH designs,
+   with no detector needed.
+2. **Detector recall on the 1,776 keyframe boxes.** Run PointPillars on the keyframe scans and
+   measure recovery of the verified boxes. This is the **go/no-go** for detector-as-measurement:
+   good recall → build the MOT; poor recall at range → fine-tune on the keyframe boxes or fall
+   back to the gated-centroid measurement.
 
-## Known Limitation — keyframe-only annotation
-ZOD annotates one keyframe per 20s clip, so a pedestrian present only before/after it is never
-annotated and cannot become a labeled sample (no intent, no identity). Out of scope for the
-labeled set; state this in the paper.
+## Detectors: roles
+No per-frame ground truth beyond the keyframe, so the keyframe boxes are the only validation set.
+- **3D — PointPillars / CenterPoint**: primary per-scan measurement; validated (recall) against
+  the 1,776 keyframe boxes.
+- **2D — YOLO + ByteTrack + SAM**: appearance features (crops, body orientation, occlusion masks)
+  for intent labeling, AND an independent cross-check (project the 3D track to camera via
+  `projection.py`, compare vs the 2D track — **agreement metric, not accuracy**).
+
+## Two-tier labels — keyframe coverage
+ZOD annotates one keyframe per 20s clip, so a pedestrian present only before/after it carries no
+ZOD annotation. We DO admit such pedestrians, in a separate quality tier so the verified set stays
+clean (`label_confidence_tier`, `is_in_gold_standard` already in the schema):
+- **GOLD** — keyframe-anchored peds: verified ZOD identity + 3D box.
+- **SILVER** — detector-found peds: no human verification; flagged
+  `label_confidence_tier=low`, `is_in_gold_standard=false`. Grows the set; reportable separately
+  so benchmark metrics on GOLD remain uncontaminated.
 
 ## Sample Schema (key fields)
 
