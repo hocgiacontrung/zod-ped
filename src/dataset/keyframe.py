@@ -1,8 +1,8 @@
 """Keyframe-scan and ground-truth loaders shared across Step 2 and its bring-up experiments.
 
 ZOD annotates a single keyframe per 20s clip. These helpers locate the LiDAR scan nearest the
-keyframe and read the verified pedestrian 3D boxes from it. Both the detector-recall experiment
-(`scripts/eval_detector_recall.py`) and the Step 2 driver consume this module, so the keyframe
+keyframe and read the verified pedestrian 3D boxes from it. Both the frustum POC
+(`scripts/frustum_poc.py`) and the Step 2 driver consume this module, so the keyframe
 logic lives in exactly one place.
 
 Frame conventions (verified during exploration, seq 000007):

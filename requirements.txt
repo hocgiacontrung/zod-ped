@@ -1,25 +1,26 @@
 # ============================================================================
-# requirements.txt — full env for the ZOD pedestrian intent/trajectory pipeline.
-# Conda env `zod-iac`, Python 3.10, CUDA 12.x, RTX 4080.  (Single source of truth:
-# the old requirements-detector.txt was merged into this file on 2026-06-17.)
+# requirements.txt — env for the ZOD pedestrian intent/trajectory pipeline.
+# Conda env `zod-iac`, Python 3.10, CUDA 12.x, RTX 4080.
 #
 #   pip install -r requirements.txt
 #
-# ‼ This installs only the PIP-RESOLVABLE parts (verified to resolve & run). Three
-#   pieces of the detector path are NOT pip-installable — see "MANUAL STEPS" at the
-#   bottom. The base pipeline + bring-up gates need NONE of those.
-#
 # Tiers (top to bottom = install order; order matters):
-#   [A] core pipeline      — Steps 1-3, both bring-up gates. numpy/scipy/shapely only.
-#   [B] notebooks & viz    — exploration + results notebooks (optional for headless).
-#   [C] 3D detector stack  — gate #2 real run (scripts/eval_detector_recall.py
-#                            --detector pointpillars). Needs the manual steps too.
+#   [A] core pipeline    — Steps 1-3 + world-frame validation. numpy/scipy/shapely only.
+#   [B] notebooks & viz  — exploration + results notebooks (optional for headless).
+#   [C] 2D + frustum     — 2D detector recall (scripts/eval_detector2d_recall.py) and the
+#                          frustum POC (scripts/frustum_poc.py): YOLO box -> ZOD projection
+#                          -> LiDAR depth. This is the retained Step 2 measurement path.
+#
+# NOTE: off-the-shelf 3D detectors (PointPillars / OpenPCDet) were dropped after the
+# bring-up gates (see docs/EXPERIMENTS_LOG.md; code recoverable at the
+# `experiments/3d-detectors` tag). Their stack — spconv, numba, easydict, gdown, etc. —
+# is intentionally NOT listed here. Any future heavy detector (Detectron2, SAM4D) should
+# get its OWN conda env so `zod-iac` stays clean and conflict-free.
 # ============================================================================
 
 # --- [0] NumPy pin — install FIRST, everything below assumes it -----------------
-# torch 2.2.0+cu121 is built against NumPy 1.x; NumPy 2.x → "_ARRAY_API not found"
-# and breaks all torch<->numpy interop. numba (tier C) also requires numpy<2.1.
-# This single pin is the #1 environment blocker.
+# torch 2.2.0+cu121 is built against NumPy 1.x; NumPy 2.x -> "_ARRAY_API not found"
+# and breaks all torch<->numpy interop. This single pin is the #1 environment blocker.
 numpy==1.26.4
 
 # --- [A] Core pipeline (the only third-party imports in src/ + scripts/) ---------
@@ -36,52 +37,9 @@ opencv-python==4.11.0.86
 notebook==7.5.6
 tqdm==4.67.3
 
-# --- [C] 3D detector stack (gate #2: detector-as-measurement) -------------------
+# --- [C] 2D detector + frustum (retained Step 2 measurement path) ----------------
 # torch already in zod-iac; pinned for reproducibility. To reinstall:
-#   pip install torch==2.2.0 --index-url https://download.pytorch.org/whl/cu121
+#   pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
 torch==2.2.0
-spconv-cu121==2.3.8     # sparse-conv backend; must match CUDA 12.x
-numba==0.59.1
-llvmlite==0.42.0
-easydict==1.13
-scikit-image==0.25.2
-tensorboardX==2.6.5
-SharedArray==3.2.4
-kornia==0.8.2
-pyquaternion==0.9.9
-gdown==6.1.0            # pull the OpenPCDet checkpoint from Google Drive
-
-# ============================================================================
-# MANUAL STEPS — NOT pip-installable. Needed ONLY for the detector (tier C) run.
-# (Verified working on zod-iac, 2026-06-17. Full notes: memory/detector_env_buildout.)
-#
-# 1. CUDA toolkit + a compatible compiler (nvcc is absent by default):
-#       conda install -c nvidia -c conda-forge cuda-toolkit=12.1 gxx=12
-#    NOTE: the solver may give CUDA 12.9 — fine (major-compatible with torch 12.1).
-#    Headers land in $CONDA_PREFIX/targets/x86_64-linux/include (NOT .../include),
-#    so before building OpenPCDet export:
-#       export CUDA_HOME="$CONDA_PREFIX"
-#       export CC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc"
-#       export CXX="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++"
-#       export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:$CPATH"
-#       export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib:$LIBRARY_PATH"
-#       export TORCH_CUDA_ARCH_LIST="8.9"   # RTX 4080 (Ada)
-#
-# 2. OpenPCDet (pcdet) — build from source, NOT a wheel:
-#       git clone https://github.com/open-mmlab/OpenPCDet.git ~/OpenPCDet
-#       cd ~/OpenPCDet && pip install -e . --no-build-isolation
-#    (plain `setup.py develop` fails — build isolation hides torch.)
-#    Two local patches to the clone were needed (see memory/detector_env_buildout):
-#      - make the argo2 dataset import optional in pcdet/datasets/__init__.py
-#      - replace removed numpy aliases np.int/np.float/np.bool in 5 pcdet files
-#
-# 3. Pedestrian-capable checkpoint (nuScenes PP-MultiHead):
-#       cd ~/OpenPCDet && mkdir -p checkpoints && cd checkpoints
-#       gdown 1p-501mTWsq0G9RzroTWSXreIMyTUUpBM -O cbgs_pp_multihead_nds5823_updated.pth
-#    Run the gate FROM ~/OpenPCDet/tools (so the cfg's relative _BASE_CONFIG_ resolves):
-#       cd ~/OpenPCDet/tools && python <repo>/scripts/eval_detector_recall.py \
-#         --detector pointpillars \
-#         --pp-cfg  cfgs/nuscenes_models/cbgs_pp_multihead.yaml \
-#         --pp-ckpt ~/OpenPCDet/checkpoints/cbgs_pp_multihead_nds5823_updated.pth \
-#         --score-thresh 0.1   # intensity is fed RAW 0-255 by default (nuScenes convention)
-# ============================================================================
+torchvision==0.17.0
+ultralytics==8.4.69     # YOLO11x 2D detector (frustum front-end)

@@ -1,9 +1,9 @@
 """Gate #3 — 2D detector recall against the keyframe pedestrian boxes (image plane).
 
-Counterpart to `scripts/eval_detector_recall.py` (the 3D/LiDAR gate). A COCO-trained 2D
+Counterpart to the frustum POC (`scripts/frustum_poc.py`, the 2D->3D gate). A COCO-trained 2D
 detector ("person" class) is run on each sequence's KEYFRAME CAMERA IMAGE and matched by
 IoU to the verified keyframe 2D pedestrian boxes. Two reasons this is a cleaner experiment
-than the 3D gate:
+than a 3D-detector gate:
   * zero temporal offset — the keyframe IS a camera frame (the LiDAR gate detects on a scan
     37-55 ms away);
   * COCO "person" generalizes far better than a nuScenes-pretrained LiDAR detector, and the
