@@ -20,15 +20,18 @@
   - Unit of work: the PEDESTRIAN (one track per pedestrian), NOT the window.
     Does NOT load candidate_windows.json; derives the (seq, ped) set and tracks each
     once over the full 20s clip.
-  - Architecture: DETECTOR-AS-MEASUREMENT + KALMAN/RTS-AS-LINKER.
-      * 3D detector (PointPillars / CenterPoint) localizes pedestrians per scan — the
-        per-frame box is the measurement (independent of any motion model, so stop/start
-        is captured by detection, not invented by the filter).
-      * The KF/RTS linker (constant-velocity Kalman + RTS smoother) associates detections
+  - Architecture: DETECTOR-AS-MEASUREMENT + KALMAN/RTS-AS-LINKER. The LINKER is settled; the
+    MEASUREMENT SOURCE changed on 2026-06-18 — see "Step 2 — Direction & open options" below.
+      * Measurement (current direction) = a strong 2D detector (Detectron2 / YOLO) box lifted
+        to 3D via ZOD calibration + in-frustum LiDAR depth (the "frustum" method). Localizes
+        per scan independent of any motion model, so stop/start is captured by detection, not
+        invented by the filter. (A MODERN 3D detector, e.g. SAM4D, is an open option to add or
+        replace this — NOT the old PointPillars/CenterPoint, which failed the bring-up gate.)
+      * The KF/RTS linker (constant-velocity Kalman + RTS smoother) associates measurements
         across scans, coasts through gaps, and smooths — it links boxes into a track but is
         NO LONGER the source of position during normal tracking.
-      * 2D detector (YOLO + ByteTrack, SAM masks) runs on the camera stream for appearance
-        features (crops, body orientation, occlusion) and as an independent cross-check.
+      * The 2D detector also supplies appearance features (crops, body orientation, occlusion)
+        for intent labeling and serves as an independent cross-check.
   - Compensate FIRST: lift each scan's points to a single world frame
     [ pose(t) @ T_ego_lidar @ p_lidar ], interpolating the ego pose at scan time (SLERP+lerp),
     so ego motion is never mistaken for pedestrian motion. Shared by detector and linker.
@@ -63,6 +66,34 @@
   - Manual (~5–10%): gold standard validation subset
   - Output: data/annotations/{sample_id}.json + data/annotations/dataset_index.parquet
 ```
+
+## Step 2 — Direction & open options (updated 2026-06-18, supervisor review)
+
+The KF/RTS *linker* below is settled, but the **measurement source has changed**. The original
+plan localized pedestrians with an off-the-shelf 3D detector (PointPillars / CenterPoint). The
+bring-up gates showed that has a severe ZOD domain gap (off-the-shelf PointPillars recall
+0.11–0.49, collapsing to ~0.01–0.24 beyond 40 m where ~52 % of GT lives — see
+`docs/EXPERIMENTS_LOG.md`). The 2026-06-18 supervisor meeting redirected the approach.
+
+**Current direction (what we are building):**
+- **2D-first, lifted to 3D.** Strong 2D detector on the camera stream (moving YOLO →
+  **Detectron2**), then ZOD calibration/projection to recover 3D position — the **frustum**
+  method (2D box → in-frustum LiDAR points → nearest-depth slab). Best gate result with zero
+  training (recall 0.585, ~15 cm median localization). This is the Step-2 measurement source.
+- **Generate good-enough tracks for manual review.** The maintainer reviews/corrects the output
+  (3D via rerun / SUSTechPOINTS, 2D via CVAT / Label Studio).
+
+**Open options still on the table (decide as we go — not yet committed):**
+1. **Modern 3D detector** to add to or replace the frustum's 3D step — if a 3D model is wanted,
+   use a *new* one (e.g. **SAM4D**, 2025), NOT the old PointPillars/CenterPoint family.
+2. **Fine-tune on a few hand-annotated ZOD sequences** if off-the-shelf 2D→3D quality is
+   inadequate (supervisor-endorsed fallback; 2D expected good, 3D expected weaker).
+3. **Change dataset** — we are NOT locked to ZOD. If another dataset is more promising / easier
+   to implement / better-annotated, switch. Evaluate before committing more pipeline code.
+
+**Rejected, with evidence:** off-the-shelf PointPillars / OpenPCDet as the 3D measurement —
+domain gap too large (`docs/EXPERIMENTS_LOG.md`; code recoverable at git tag
+`experiments/3d-detectors`).
 
 ## Windowing Parameters
 ```yaml
@@ -127,25 +158,29 @@ between LiDAR frames (~111ms) → a small association gate suffices.
 > empty. Implementation kept in `src/labeling/tracker.py`; the full gated-centroid run was NOT
 > executed.
 
-## Step 2 Bring-up (gates before building the MOT)
-The detector pivot rests on two cheap, decisive experiments — both part of standing up the
-detector, NOT a separate baseline phase:
-1. **World-frame transform validation.** Track a known-static object that has `location_3d`
-   (e.g. a `TrafficGuide`/`SnowMarker` pole) through the compensate-first chain; it must stay
-   **pinned** in world coordinates. Validates pose interpolation + extrinsics for BOTH designs,
-   with no detector needed.
-2. **Detector recall on the 1,776 keyframe boxes.** Run PointPillars on the keyframe scans and
-   measure recovery of the verified boxes. This is the **go/no-go** for detector-as-measurement:
-   good recall → build the MOT; poor recall at range → fine-tune on the keyframe boxes or fall
-   back to the gated-centroid measurement.
+## Step 2 Bring-up (gates — DONE, drove the 2026-06-18 pivot)
+Two cheap, decisive experiments run before building the MOT (full numbers in
+`docs/EXPERIMENTS_LOG.md`):
+1. **World-frame transform validation — PASSED.** A known-static object (`TrafficGuide`/
+   `SnowMarker` pole) with `location_3d`, tracked through the compensate-first chain, stayed
+   **pinned** in world coordinates (seq 000007: world-frame std 0.027 m vs 0.959 m
+   uncompensated). Validates pose interpolation + extrinsics for every design; no detector needed.
+2. **Detector recall on the keyframe boxes — DONE, go/no-go answered: NO-GO for off-the-shelf
+   3D.** Off-the-shelf PointPillars recovered only 0.11 (KITTI) / 0.49 (nuScenes) of the boxes
+   and collapsed at range; the **frustum** (2D→3D) reached 0.585 with no training. → dropped
+   off-the-shelf 3D detectors, adopted the 2D→frustum measurement (see "Step 2 — Direction &
+   open options"). Remaining open lever: fine-tune, or bring in a modern 3D detector (SAM4D).
 
 ## Detectors: roles
 No per-frame ground truth beyond the keyframe, so the keyframe boxes are the only validation set.
-- **3D — PointPillars / CenterPoint**: primary per-scan measurement; validated (recall) against
-  the 1,776 keyframe boxes.
-- **2D — YOLO + ByteTrack + SAM**: appearance features (crops, body orientation, occlusion masks)
-  for intent labeling, AND an independent cross-check (project the 3D track to camera via
-  `projection.py`, compare vs the 2D track — **agreement metric, not accuracy**).
+- **2D — Detectron2 / YOLO (+ ByteTrack, SAM)**: PRIMARY. Drives the per-scan measurement via
+  the frustum lift (2D box → in-frustum LiDAR depth → 3D position), AND supplies appearance
+  features (crops, body orientation, occlusion masks) for intent labeling.
+- **3D — frustum lift (current); modern detector e.g. SAM4D (open option)**: turns the 2D box
+  into a 3D position using ZOD calibration + LiDAR. Validated (recall + localization error)
+  against the keyframe boxes. Off-the-shelf PointPillars/CenterPoint rejected (domain gap).
+- **Cross-check**: project the 3D track back to camera via `projection.py` and compare vs the 2D
+  track — **agreement metric, not accuracy** (no per-frame GT).
 
 ## Two-tier labels — keyframe coverage
 ZOD annotates one keyframe per 20s clip, so a pedestrian present only before/after it carries no

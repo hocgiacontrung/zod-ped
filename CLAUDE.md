@@ -21,9 +21,11 @@ Schema approved. Now building the pipeline.
 - [x] Exploration notebook → `notebooks/01_explore_sequence.ipynb` (seq 000007)
 - [x] Projection utility → `src/utils/projection.py`
 - [x] Step 1 script → `scripts/01_filter_sequences.py` → `data/processed/candidate_windows.json`
+- [x] Step 2 bring-up gates done → drove a **DIRECTION PIVOT** (2026-06-18, supervisor review):
+  off-the-shelf 3D detectors (PointPillars/OpenPCDet) dropped for a severe ZOD domain gap; now
+  **2D-first (Detectron2) + frustum lift to 3D**. See "Step 2 Approach" below + `docs/EXPERIMENTS_LOG.md`.
 - [ ] **Next: Step 2 – Trajectory generation** (`scripts/02_generate_trajectories.py`) —
-  detector-as-measurement architecture (see below). Two bring-up gates first:
-  (1) world-frame transform validation, (2) detector recall vs the 1,776 keyframe boxes.
+  measurement = 2D→frustum; KF/RTS linker reused from `src/labeling/tracker.py`.
 - [ ] Step 3 – Proximity filter (`scripts/03_filter_by_trajectory.py`)
 - [ ] Step 4 – Intent labeling (`scripts/04_label_intent.py`)
 
@@ -49,26 +51,33 @@ Full-set results (358 sequences, 2,159 total pedestrians):
 - Note: `MIN_LIDAR_IN_WINDOW=3` guard never fires in practice (~5 scans/0.5s window)
 - Run: ~19s for all 358; continue-on-error with a `failures` list in the output JSON
 
-## Step 2 Approach (see docs/PIPELINE.md)
-**Architecture: detector-as-measurement + KF/RTS-as-linker.** Decided 2026-06-17 over the earlier
-gated-centroid design (CV model lags at stop/start — the crossing decision — and centroid is
-surface-biased). Going straight to the detector architecture; the gated-centroid **full run was
-dropped** (kept only as a coast fallback). See [[pipeline-status]].
+## Step 2 Approach — DIRECTION PIVOT 2026-06-18 (see docs/PIPELINE.md "Direction & open options")
+**Architecture: detector-as-measurement + KF/RTS-as-linker.** The LINKER is settled; the
+MEASUREMENT SOURCE changed after the bring-up gates. Off-the-shelf 3D detectors
+(PointPillars/OpenPCDet/CenterPoint) were **rejected** — severe ZOD domain gap (recall 0.11–0.49,
+collapses >40m where ~52% of GT lives; see `docs/EXPERIMENTS_LOG.md`, code at tag
+`experiments/3d-detectors`).
+
+**Current direction (building):**
 - **Unit = pedestrian, not window**: track each ped once over the full 20s clip. Step 2 does NOT
   load the 241 MB candidate_windows.json.
-- **3D detector (PointPillars / CenterPoint) = per-scan measurement** — localizes independently
-  each frame, so stop/start is captured by detection, not invented by a motion model.
-- **KF/RTS = linker**: constant-velocity Kalman associates detections (gate) + coasts gaps; RTS
-  backward smooth. The linker machinery is reused verbatim from `src/labeling/tracker.py`; only
-  the measurement source changed (gated centroid → detector box). Coast on miss → `in_observation=false`.
+- **Measurement = 2D-first → frustum lift to 3D**: strong 2D detector (YOLO → **Detectron2**) box
+  + ZOD calibration/projection + in-frustum LiDAR depth → per-scan 3D position. Best gate (recall
+  0.585, ~15cm median, zero training). Generate good-enough tracks → The maintainer manually reviews.
+- **KF/RTS = linker** (unchanged): CV Kalman associates measurements (gate) + coasts gaps; RTS
+  backward smooth. Reused verbatim from `src/labeling/tracker.py`; only the measurement source
+  changed. Coast on miss → `in_observation=false`.
 - **Compensate-before-associate**: lift each scan to world frame via interpolated ego pose first.
 - **Two tiers**: GOLD = keyframe-anchored peds (verified box+identity); SILVER = detector-found
   peds (flagged `label_confidence_tier=low`, `is_in_gold_standard=false`) — grows the set without
   contaminating the GOLD benchmark.
-- **2D — YOLO+ByteTrack+SAM**: appearance features (crops, body orientation, occlusion) for intent
-  labeling + independent cross-check (agreement metric, not accuracy — no per-frame GT).
-- **Bring-up gates (do first):** (1) world-frame transform validation (static pole stays pinned);
-  (2) detector recall vs the 1,776 keyframe boxes (go/no-go for detector-as-measurement).
+
+**Open options still on the table (decide as we go — NOT yet committed):**
+1. **Modern 3D detector** (e.g. **SAM4D**, 2025) to add to/replace the frustum's 3D step — never
+   the old PointPillars/CenterPoint family again.
+2. **Fine-tune on a few hand-annotated ZOD sequences** if 2D→3D quality is inadequate.
+3. **Switch dataset** — not locked to ZOD; adopt another if more promising / easier / better-annotated.
+
 - Output: per-ped `data/processed/trajectories/{seq_id}_{pedestrian_id}.json` (world frame).
   `position_ego_rel` is per-window → added at sample assembly, not Step 2.
 
