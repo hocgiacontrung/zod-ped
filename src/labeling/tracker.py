@@ -1,6 +1,16 @@
-"""LiDAR-based single-pedestrian tracker — Step 2 of the ZOD pedestrian pipeline.
+"""LiDAR single-pedestrian tracker — Kalman/RTS linker + gated-centroid measurement.
 
-Implements the locked design in docs/PIPELINE.md:
+STATUS (2026-06-17): Step 2 moved to a DETECTOR-as-measurement architecture (see
+docs/PIPELINE.md). This module is retained with a split role:
+  * KEPT as the reusable LINKER — the constant-velocity Kalman (`_F`/`_Q`, predict/update)
+    and RTS smoother (`_rts_smooth`) link per-scan measurements into a smooth world-frame
+    track. The detector driver (`scripts/02_generate_trajectories.py`) will feed detector
+    boxes into this same machinery; only the measurement source changes.
+  * DEMOTED — the gated-centroid measurement (`_gate_centroid`/`_associate_pass`) is no
+    longer the primary position source; it survives only as a COAST FALLBACK for scans where
+    the detector returns nothing. The gated-centroid full run was NOT executed.
+
+The original gated-centroid design (now the fallback path) is described below:
 
   1. Compensate-before-associate: every scan's points are lifted to a single world
      frame [ pose(t) @ T_ego_lidar @ p_lidar ] before any association, so ego motion

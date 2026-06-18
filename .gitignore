@@ -11,6 +11,8 @@ outputs/
 
 # Large file types
 *.npy
+# model weights (e.g. yolo11x.pt) — re-downloaded on demand
+*.pt
 *.hdf5
 *.h5
 *.parquet
