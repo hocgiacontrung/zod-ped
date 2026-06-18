@@ -76,7 +76,10 @@ collapses >40m where ~52% of GT lives; see `docs/EXPERIMENTS_LOG.md`, code at ta
 1. **Modern 3D detector** (e.g. **SAM4D**, 2025) to add to/replace the frustum's 3D step — never
    the old PointPillars/CenterPoint family again.
 2. **Fine-tune on a few hand-annotated ZOD sequences** if 2D→3D quality is inadequate.
-3. **Switch dataset** — not locked to ZOD; adopt another if more promising / easier / better-annotated.
+3. ~~Switch dataset~~ — **RESOLVED 2026-06-18: STAYING ON ZOD.** Candidates rejected — KITScenes
+   (no pedestrian GT), Waymo Interaction Pred. (no raw sensors), NVIDIA PhysicalAI-AV (133 TB, no GT
+   ped tracks), nuScenes (old + intent already taken by PePScenes). MAN TruckScenes (GT tracks + 4D
+   radar) close but truck/highway = sparse pedestrians. ZOD novelty intact; auto-labeling validated.
 
 - Output: per-ped `data/processed/trajectories/{seq_id}_{pedestrian_id}.json` (world frame).
   `position_ego_rel` is per-window → added at sample assembly, not Step 2.

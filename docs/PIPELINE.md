@@ -88,8 +88,13 @@ bring-up gates showed that has a severe ZOD domain gap (off-the-shelf PointPilla
    use a *new* one (e.g. **SAM4D**, 2025), NOT the old PointPillars/CenterPoint family.
 2. **Fine-tune on a few hand-annotated ZOD sequences** if off-the-shelf 2D→3D quality is
    inadequate (supervisor-endorsed fallback; 2D expected good, 3D expected weaker).
-3. **Change dataset** — we are NOT locked to ZOD. If another dataset is more promising / easier
-   to implement / better-annotated, switch. Evaluate before committing more pipeline code.
+3. ~~Change dataset~~ — **RESOLVED 2026-06-18: STAYING ON ZOD.** Re-evaluated alternatives:
+   KITScenes (HD-maps, no pedestrian GT), Waymo Interaction Prediction (trajectories only, no raw
+   sensors), NVIDIA PhysicalAI-AV (133 TB, machine-labels, no GT ped tracks) all rejected; nuScenes
+   dropped (2019, and pedestrian-intent already taken by PePScenes); MAN TruckScenes the only real
+   rival (GT tracks + 4D radar) but truck/highway → sparse pedestrians. ZOD keeps its cam+LiDAR+radar
+   novelty; auto-labeling is a sound, validated methodology. Trade-off accepted: no GT trajectories →
+   auto-generate via 2D→frustum (+ fine-tune a few sequences if needed) + manual review.
 
 **Rejected, with evidence:** off-the-shelf PointPillars / OpenPCDet as the 3D measurement —
 domain gap too large (`docs/EXPERIMENTS_LOG.md`; code recoverable at git tag
