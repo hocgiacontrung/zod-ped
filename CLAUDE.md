@@ -24,8 +24,13 @@ Schema approved. Now building the pipeline.
 - [x] Step 2 bring-up gates done → drove a **DIRECTION PIVOT** (2026-06-18, supervisor review):
   off-the-shelf 3D detectors (PointPillars/OpenPCDet) dropped for a severe ZOD domain gap; now
   **2D-first (Detectron2) + frustum lift to 3D**. See "Step 2 Approach" below + `docs/EXPERIMENTS_LOG.md`.
-- [ ] **Next: Step 2 – Trajectory generation** (`scripts/02_generate_trajectories.py`) —
-  measurement = 2D→frustum; KF/RTS linker reused from `src/labeling/tracker.py`.
+- [~] **Step 2 – Trajectory generation** (`scripts/02_generate_trajectories.py`) — **GOLD tier
+  BUILT** (2026-06-22). Measurement = 2D (YOLO11x) → frustum lift to world; KF/RTS linker reused
+  from `src/labeling/tracker.py` (`track_pedestrian_from_detections`); frustum extracted to
+  `src/labeling/frustum.py`; BEV review viewer `scripts/viz_trajectories.py`. Verified on 6 seqs
+  (36 tracks, 0 failures, 0 false-association jumps). Detector stays YOLO (Detectron2 not built —
+  no torch-2.2 wheel; swap deferred, `make_detector` handles rtdetr*). **TODO:** full 358 run
+  (~4.7h), manual review, then SILVER tier (detector-discovered peds + track birth/dedup).
 - [ ] Step 3 – Proximity filter (`scripts/03_filter_by_trajectory.py`)
 - [ ] Step 4 – Intent labeling (`scripts/04_label_intent.py`)
 

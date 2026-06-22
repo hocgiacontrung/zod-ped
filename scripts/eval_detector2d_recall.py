@@ -55,19 +55,24 @@ class Detection2D:
     score: float
 
 
-def make_yolo(model_name: str = "yolo11x.pt", conf: float = 0.25, imgsz: int = 1280,
-              person_class: int = COCO_PERSON_CLASS):
-    """Build a YOLO detector once and return a per-image `(path) -> List[Detection2D]` closure.
+def make_detector(model_name: str = "yolo11x.pt", conf: float = 0.25, imgsz: int = 1280,
+                  person_class: int = COCO_PERSON_CLASS):
+    """Build a COCO detector once and return a per-image `(path) -> List[Detection2D]` closure.
+
+    Dispatches on `model_name`: a `rtdetr*` name loads ultralytics' RT-DETR, anything else
+    loads YOLO. Both share the same `.predict(...)` / `.boxes` interface, so the gate code and
+    the Step 2 driver are detector-agnostic and the two are an apples-to-apples comparison.
 
     `imgsz=1280` (vs the 640 default) matters: ZOD images are 3848x2168, so distant
     pedestrians are tiny and get lost at low input resolution.
     """
+    is_rtdetr = Path(model_name).name.lower().startswith("rtdetr")
     try:
-        from ultralytics import YOLO
+        from ultralytics import RTDETR, YOLO
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Could not import ultralytics. `pip install ultralytics`. {exc!r}") from exc
 
-    model = YOLO(model_name)
+    model = (RTDETR if is_rtdetr else YOLO)(model_name)
 
     def detector(image_path: Path) -> List[Detection2D]:
         res = model.predict(source=str(image_path), imgsz=imgsz, conf=conf,
@@ -77,6 +82,10 @@ def make_yolo(model_name: str = "yolo11x.pt", conf: float = 0.25, imgsz: int = 1
         return [Detection2D(xyxy=b, score=float(s)) for b, s in zip(xyxy, scores)]
 
     return detector
+
+
+# Back-compat alias: earlier code (e.g. scripts/frustum_poc.py) imports `make_yolo`.
+make_yolo = make_detector
 
 
 def iou_one_to_many(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:

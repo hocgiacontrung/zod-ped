@@ -42,6 +42,7 @@ from dataset.keyframe import (  # noqa: E402
     load_keyframe_pedestrians, load_xyzi, motion_compensate_to_keyframe,
     nearest_lidar_scan, parse_zod_ts, points_in_box,
 )
+from labeling.frustum import lift_box_to_3d  # noqa: E402
 from utils.projection import load_calibration, project_lidar_to_image  # noqa: E402
 
 SEQ_DIR = ROOT / "data" / "raw" / "sequences"
@@ -59,32 +60,6 @@ class Frustum3D:
     center: np.ndarray   # (3,) x, y, z
     score: float
     n_points: int        # LiDAR points used for the estimate
-
-
-def lift_box_to_3d(box_xyxy: np.ndarray, uv: np.ndarray, pts: np.ndarray,
-                   box_shrink: float, slab_m: float, min_pts: int) -> Optional[Tuple[np.ndarray, int]]:
-    """Estimate a 3D centre from the LiDAR points inside a (shrunk) 2D box.
-
-    `uv` is the (M,2) pixel projection of the visible LiDAR points `pts` (M,3, LiDAR frame).
-    We shrink the box toward its centre column (pedestrians are tall+thin; the box edges leak
-    background), keep the points inside it, then take the NEAREST depth slab and its median.
-    """
-    x1, y1, x2, y2 = box_xyxy
-    cx = 0.5 * (x1 + x2)
-    hw = 0.5 * (x2 - x1) * box_shrink
-    # keep central column horizontally; trim head/feet a little vertically (blur + ground)
-    y_lo = y1 + 0.10 * (y2 - y1)
-    y_hi = y1 + 0.90 * (y2 - y1)
-    inside = (uv[:, 0] >= cx - hw) & (uv[:, 0] <= cx + hw) & (uv[:, 1] >= y_lo) & (uv[:, 1] <= y_hi)
-    fp = pts[inside]
-    if len(fp) < min_pts:
-        return None
-    rng = np.linalg.norm(fp[:, :2], axis=1)
-    r0 = np.percentile(rng, 15)            # robust "nearest" range
-    slab = fp[rng <= r0 + slab_m]          # closest compact cluster (reject background)
-    if len(slab) < min_pts:
-        slab = fp
-    return np.median(slab, axis=0), len(slab)
 
 
 def match_greedy_3d(dets: List[Frustum3D], gts: List[GtBox], match_dist_m: float):
