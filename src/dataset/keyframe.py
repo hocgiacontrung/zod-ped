@@ -1,18 +1,18 @@
-"""Keyframe-scan and ground-truth loaders shared across Step 2 and its bring-up experiments.
+"""Keyframe-scan and ground-truth loaders shared across Step 1 (trajectory generation) and its
+bring-up experiments.
 
 ZOD annotates a single keyframe per 20s clip. These helpers locate the LiDAR scan nearest the
 keyframe and read the verified pedestrian 3D boxes from it. Both the frustum POC
-(`scripts/frustum_poc.py`) and the Step 2 driver consume this module, so the keyframe
-logic lives in exactly one place.
+(`scripts/frustum_poc.py`) and the Step 1 driver consume this module, so the keyframe
+logic lives in exactly one place. This module is the single source of truth for the
+keyframe (seq, pedestrian) set — it selects pedestrians directly from the annotations
+(`class == "Pedestrian"` with `location_3d`), so nothing upstream needs to pre-enumerate them.
 
 Frame conventions (verified during exploration, seq 000007):
   * LiDAR `.npy` is a STRUCTURED array — fields x, y, z, timestamp, intensity, diode_index.
   * `location_3d` and box sizes in object_detection.json are in the LiDAR SENSOR frame, the same
     frame as the raw points — so GT boxes and points can be compared directly, no transform.
   * LiDAR filenames are UTC timestamps; match the keyframe by timestamp, never by index.
-
-NOTE: `scripts/01_filter_sequences.py` still has its own inline copies of `parse_zod_ts` /
-nearest-scan logic (predates this module). Fold it onto these helpers when 01 is next touched.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-# Max gap tolerated between the keyframe time and the nearest LiDAR scan (mirrors Step 1).
+# Max gap tolerated between the keyframe time and the nearest LiDAR scan.
 MAX_LIDAR_GAP_S = 0.055
 
 
@@ -112,7 +112,8 @@ def load_keyframe_pedestrians(seq_dir: Path) -> List[GtBox]:
     """Read 3D pedestrian boxes from a sequence's keyframe annotation.
 
     Keeps only entries with ``class == "Pedestrian"`` that carry ``location_3d`` (2D-only
-    pedestrians cannot anchor a 3D box and are skipped, matching Step 1).
+    pedestrians cannot anchor a 3D box and are skipped). This selection is the single source
+    of truth for the GOLD (seq, pedestrian) set.
     """
     det_path = seq_dir / "annotations" / "object_detection.json"
     detections = json.loads(det_path.read_text())

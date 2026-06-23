@@ -1,10 +1,9 @@
-"""Step 2 bring-up gate #1 — validate the compensate-before-associate transform chain.
+"""Trajectory bring-up gate #1 — validate the compensate-before-associate transform chain.
 
 The detector architecture (and the tracker) lift every scan's points to a single world frame via
 `p_world = pose(t) @ T_ego_lidar @ p_lidar`. If that chain is wrong (pose interpolation,
 extrinsics, or frame conventions), ego motion leaks into the trajectories and every downstream
-metric is poisoned — silently. This script checks it WITHOUT any detector or GPU, so it can run
-today regardless of the env situation.
+metric is poisoned — silently.
 
 Idea: a STATIC object (sign / signal / pole) must stay PINNED in the world frame as the ego moves.
 We seed on a static keyframe box, then for each nearby scan compute the gate-centroid of points

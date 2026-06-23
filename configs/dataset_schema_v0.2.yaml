@@ -1,0 +1,268 @@
+# ============================================================
+# ZOD Pedestrian Intent & Trajectory Dataset — Schema v0.2
+# Last updated: 2026-06-23
+#
+# SUPERSEDES v0.1 (configs/dataset_schema_v0.1.yaml), which is kept frozen as the
+# supervisor-approved Week-1 snapshot. This file is the LIVE source of truth; it reconciles
+# the schema with the post-pivot pipeline reality. Changes vs v0.1:
+#   - filtering: split into Step-1 pedestrian selection vs Step-2 per-window assembly;
+#     require_lidar_detection is no longer a hard filter (GOLD seeds geometrically).
+#   - trajectory.frames: added num_lidar_points and tracking_lost; in_observation re-defined
+#     to mean "detector observed this scan" (false while coasting), matching the tracker output.
+#   - trajectory generation notes: 2D detector → frustum lift + KF/RTS linker (was LiDAR
+#     IoU / nearest-neighbor).
+#   - intent: added soft_label.
+#   - dataset_stats: basis is the 358-sequence working set; totals PENDING recomputation.
+#
+# STATUS LEGEND:
+#   [CONFIRMED]  — decided, ready to implement
+#   [PENDING]    — needs explicit supervisor decision
+# ============================================================
+
+# ─────────────────────────────────────────
+# WINDOWING STRATEGY
+# ─────────────────────────────────────────
+
+windowing:
+  # [CONFIRMED] Unit of data = one observation window
+  # One sequence → multiple overlapping windows → multiple samples
+  # Windows are materialised in Step 2 from the deterministic grid (not pre-enumerated).
+  unit: observation_window
+
+  # [CONFIRMED] Duration of observation window
+  observation_window_s: 0.5        # ~5 camera frames, ~4 LiDAR scans at ZOD rates
+
+  # [CONFIRMED] Overlap ratio between consecutive windows (PIE uses 0.5 and 0.8)
+  overlap_ratio: 0.5               # → stride = 0.25s
+
+  # [CONFIRMED] Prediction horizons — evaluate at all three (following PIE)
+  prediction_horizons_s: [1.0, 1.5, 2.0]
+
+
+# ─────────────────────────────────────────
+# FILTERING / INCLUSION CRITERIA
+# ─────────────────────────────────────────
+# Split by pipeline stage: selection happens in Step 1 (trajectory generation); all
+# position/availability filters are deferred to Step 2, where per-frame TRACKED positions
+# exist (the single keyframe annotation is a poor proxy for windows up to ~14m away).
+
+filtering:
+
+  # --- Step 1: pedestrian selection (trajectory generation) ---
+  # [CONFIRMED] Skip 2D-only pedestrians (no location_3d) — they cannot anchor a 3D box.
+  require_3d_annotation: true
+
+  # [CONFIRMED] A keyframe LiDAR-in-box check is NOT a hard filter. GOLD tracks seed
+  # geometrically from the box centre and recover depth from later-frame detections, so a
+  # sparse keyframe return does not disqualify a pedestrian. (Was require_lidar_detection in v0.1.)
+  require_lidar_detection: false
+
+  # --- Step 2: per-window assembly (requires tracked trajectory) ---
+  # [CONFIRMED] Minimum valid LiDAR frames per window; skip windows with missing scans.
+  min_lidar_frames_in_window: 3    # out of ~4 expected
+
+  # [CONFIRMED] Max distance from pedestrian to ego vehicle, at the window midpoint.
+  # Pedestrians >50m are too small in camera frame and have sparse LiDAR points.
+  max_distance_to_ego_m: 50.0
+
+  # [CONFIRMED] Max distance from pedestrian to ego road boundary, at the window midpoint.
+  # Pedestrians far from the road are not crossing candidates.
+  max_distance_to_road_m: 15.0
+
+  # [CONFIRMED] No occlusion-based filtering; all windows included, flagged in metadata.
+  max_occlusion: Heavy
+
+
+# ─────────────────────────────────────────
+# SAMPLE STRUCTURE
+# ─────────────────────────────────────────
+
+sample:
+
+  # --- Identity ---
+  sequence_id: str               # e.g. "000007"
+  pedestrian_id: str             # annotation_uuid from object_detection.json
+  sample_id: str                 # "{sequence_id}_{pedestrian_id}_{window_start_ms}"
+
+  # --- Temporal ---
+  # [CONFIRMED] Time-based definition (not frame-count-based)
+  # Allows fair cross-dataset comparison despite different sensor fps
+  window_start_timestamp: str    # UTC, ISO format
+  window_end_timestamp: str      # UTC (= window_start + 0.5s)
+  keyframe_timestamp: str        # UTC timestamp of ZOD annotation frame
+                                 # Note: keyframe is the central frame of the full
+                                 # 20s sequence, not necessarily inside this window
+
+
+  # ─────────────────────────────────────────
+  # INTENT LABEL
+  # ─────────────────────────────────────────
+
+  intent:
+    # [CONFIRMED] Per-window label (one label for the entire 0.5s window) — unlike PIE's
+    # per-encounter label, and without per-frame human annotation (unlike PSI).
+    label: crossing | not_crossing | uncertain
+
+    # [PENDING] Definition of "crossing"
+    crossing_definition: TBD
+    crossing_completed: bool       # only meaningful when label = crossing
+
+    # [CONFIRMED] Confidence score from the labeling pipeline (independent of the label).
+    # High: trajectory clearly crosses / clearly stays away. Low: near road boundary, ambiguous.
+    confidence: float              # 0.0 – 1.0
+
+    # [CONFIRMED] Soft label — class probabilities for training / calibration.
+    soft_label:
+      p_crossing: float
+      p_not_crossing: float
+      p_uncertain: float
+
+    # [CONFIRMED] Labeling method — for transparency and quality analysis
+    method: rule_based | vlm | manual
+
+    # [CONFIRMED] VLM only used for edge cases. Method mix (target):
+    # ~75–80%: rule-based trajectory × ego road intersection check
+    # ~10–15%: pose estimation for ambiguous cases
+    # ~5%:     VLM (Gemini free tier or local Llama 3.2 Vision 11B) — always given trajectory
+    #          coordinates in the prompt, not image-only
+    # ~5–10%:  manual gold standard for validation
+
+
+  # ─────────────────────────────────────────
+  # TRAJECTORY
+  # ─────────────────────────────────────────
+
+  trajectory:
+    # [CONFIRMED] Trajectory covers observation window + prediction horizon (e.g. 0.5s + 1.5s).
+    # [CONFIRMED] Store both coordinate frames; use ego-relative for training.
+    #   World frame: GPS-aligned, for analysis and visualization.
+    #   Ego-relative: relative to ego at window_start (removes GPS drift; generalizes across
+    #                 locations). Added per-window in Step 2 (sample assembly), not by Step 1.
+
+    frames:
+      - timestamp: str             # UTC timestamp of this LiDAR scan
+        position_world: [x, y, z]  # meters, world/GPS-aligned frame
+        position_ego_rel: [x, y, z] # meters, relative to ego at window_start
+        in_observation: bool       # detector observed this scan; false while COASTING (gate empty)
+        num_lidar_points: int      # points in the gate this scan (-1 = coasted, no measurement)
+        tracking_lost: bool        # true while coasting past the last good measurement
+        kalman_confidence: float   # from innovation residual; lower = more reliable; 0.0 coasted
+        tracking_method: anchor | forward | backward
+        # anchor: from ZOD keyframe annotation (highest confidence)
+        # forward: propagated forward from the seed
+        # backward: propagated backward from the seed
+
+    # Trajectory generation pipeline (Step 1 — see docs/PIPELINE.md "Architecture"):
+    # 1. Seed: keyframe 3D box (GOLD) / first confident detection (SILVER), lifted to world.
+    # 2. Measure: 2D detector box per scan → frustum lift to a 3D position (in-frustum LiDAR depth).
+    # 3. Compensate: lift every scan to the world frame via ego_motion.json before associating.
+    # 4. Link: constant-velocity Kalman associates + coasts; RTS backward smoothing.
+
+
+  # ─────────────────────────────────────────
+  # MULTIMODAL DATA (paths only, not embedded)
+  # ─────────────────────────────────────────
+
+  multimodal:
+
+    # [CONFIRMED] Camera — ~5 frames in observation window
+    camera_frames:
+      - timestamp: str
+        path: str                  # relative to data/raw/sequences/XXXXXX/
+
+    # [CONFIRMED] LiDAR — ~4 scans in observation window
+    # Each .npy file: structured array (x, y, z, timestamp, intensity, diode_index)
+    # diode_index 1–127: VLS128 main, 128–143: left VLP16, 144–159: right VLP16
+    lidar_scans:
+      - timestamp: str
+        path: str                  # relative to data/raw/sequences/XXXXXX/
+
+    # [CONFIRMED] Radar — path included but optional for model use (low resolution, hard to
+    # isolate a single pedestrian). Provides range_rate (Doppler). Included for completeness.
+    radar_path: str
+
+    # GNSS/IMU raw data: NOT included per sample; used internally for ego-motion compensation.
+
+
+  # ─────────────────────────────────────────
+  # CONTEXT FEATURES
+  # ─────────────────────────────────────────
+  # Distilled from raw sensor data — ready to use as model input
+
+  context:
+    # [CONFIRMED] Ego vehicle state at window_start
+    ego_speed_ms: float            # m/s from vehicle data
+    ego_heading_deg: float         # degrees, from GNSS/IMU
+
+    # [CONFIRMED] Turn indicator — strong context for pedestrian decision-making
+    turn_indicator: none | left | right
+
+    # [PENDING] Brake pedal — active vehicle-pedestrian negotiation (may be redundant with speed)
+    brake_pedal_ratio: float       # 0.0 – 1.0
+
+    # [CONFIRMED] Pedestrian state at window_start (from tracked trajectory)
+    distance_to_ego_m: float       # meters
+    distance_to_road_m: float      # meters to nearest ego road boundary point
+    occlusion: null | Light | Heavy
+
+
+  # ─────────────────────────────────────────
+  # METADATA
+  # ─────────────────────────────────────────
+
+  metadata:
+    # Geographic info (from LiDAR filename, e.g. "000007_quebec_2022-02-14...")
+    location: str                  # e.g. "quebec", "sweden", "germany"
+    collection_date: str           # YYYY-MM-DD
+
+    # [PENDING] Split ratio — assigned at SEQUENCE level (not window level) to prevent leakage
+    # between overlapping windows of the same sequence.
+    split: train | val | test
+
+    # Label quality flags (drive the GOLD / SILVER two-tier split — see docs/PIPELINE.md)
+    label_confidence_tier: high | medium | low
+    # high:   rule-based, clear crossing/not-crossing
+    # medium: rule-based, trajectory near the road boundary
+    # low:    VLM-assisted or manual, or SILVER (detector-found, unverified)
+    is_in_gold_standard: bool      # true = keyframe-anchored & verified (GOLD)
+
+    # Multi-pedestrian: one sample per pedestrian (all labeled)
+    num_pedestrians_in_scene: int
+    is_key_pedestrian: bool        # whether this is the primary pedestrian
+
+
+# ─────────────────────────────────────────
+# OUTPUT FORMAT
+# ─────────────────────────────────────────
+
+output_format:
+  # [CONFIRMED] Follow PIE/PSI convention: one JSON file per sample.
+  # [CONFIRMED] Addition over PIE/PSI: a dataset-level Parquet index (one row per sample, all
+  #   scalar fields) for fast filtering without touching per-sample JSONs. Regenerated if
+  #   annotations change.  Example: df[(df.split=="test") & (df.label!="uncertain")]
+  per_sample: json                 # data/annotations/{sample_id}.json
+  raw_sensor_data: file_references # paths relative to data/raw/sequences/
+  dataset_index: parquet           # data/annotations/dataset_index.parquet
+
+
+# ─────────────────────────────────────────
+# DATASET-LEVEL STATISTICS (target)
+# ─────────────────────────────────────────
+
+dataset_stats:
+  # Working set: 358 sequences with pedestrian annotations + LiDAR on disk.
+  # [PENDING] estimated_total_samples — RECOMPUTE after Step 2/3 (windows materialise + filter),
+  #   then confirm with supervisor. The v0.1 figure (1,300–1,950) was based on a 130-sequence set
+  #   and is stale.
+  estimated_total_samples: TBD
+
+  # [PENDING] confirm split ratio
+  estimated_split:
+    train: "~70%"
+    val:   "~15%"
+    test:  "~15%"
+
+  # [PENDING] confirm target crossing ratio
+  # Real-world urban crossing rate: ~15–30% (ref: JAAD/PIE statistics)
+  target_crossing_ratio: "~20–30%"
+  # Note: may need to balance via subsampling not_crossing windows

@@ -1,10 +1,10 @@
 """LiDAR single-pedestrian tracker — Kalman/RTS linker + gated-centroid measurement.
 
-STATUS (2026-06-17): Step 2 moved to a DETECTOR-as-measurement architecture (see
+STATUS (2026-06-17): trajectory generation (Step 1) uses a DETECTOR-as-measurement architecture (see
 docs/PIPELINE.md). This module is retained with a split role:
   * KEPT as the reusable LINKER — the constant-velocity Kalman (`_F`/`_Q`, predict/update)
     and RTS smoother (`_rts_smooth`) link per-scan measurements into a smooth world-frame
-    track. The detector driver (`scripts/02_generate_trajectories.py`) will feed detector
+    track. The detector driver (`scripts/01_generate_trajectories.py`) will feed detector
     boxes into this same machinery; only the measurement source changes.
   * DEMOTED — the gated-centroid measurement (`_gate_centroid`/`_associate_pass`) is no
     longer the primary position source; it survives only as a COAST FALLBACK for scans where
@@ -346,7 +346,7 @@ def track_pedestrian(
 
 
 # ===========================================================================
-# Detector-as-measurement linker (Step 2 PRIMARY path; see docs/PIPELINE.md)
+# Detector-as-measurement linker (Step 1 PRIMARY path; see docs/PIPELINE.md)
 # ---------------------------------------------------------------------------
 # Same constant-velocity Kalman + RTS smoother as above; only the measurement source
 # differs. Per frame the driver supplies a SET of candidate world positions (the frame's
@@ -454,7 +454,7 @@ def track_pedestrian_from_detections(
     The detector-as-measurement counterpart of `track_pedestrian`: seeds at the keyframe
     (the verified GOLD anchor), associates frustum detections forward and backward, then
     RTS-smooths the merged track. The candidate POOL is built once per sequence by the
-    Step 2 driver and shared across that sequence's pedestrians.
+    Step 1 driver and shared across that sequence's pedestrians.
 
     Args:
         frames:                  Per-frame candidate pools (any order; sorted internally).

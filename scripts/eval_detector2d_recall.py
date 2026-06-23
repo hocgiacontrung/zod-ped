@@ -61,7 +61,7 @@ def make_detector(model_name: str = "yolo11x.pt", conf: float = 0.25, imgsz: int
 
     Dispatches on `model_name`: a `rtdetr*` name loads ultralytics' RT-DETR, anything else
     loads YOLO. Both share the same `.predict(...)` / `.boxes` interface, so the gate code and
-    the Step 2 driver are detector-agnostic and the two are an apples-to-apples comparison.
+    the Step 1 driver are detector-agnostic and the two are an apples-to-apples comparison.
 
     `imgsz=1280` (vs the 640 default) matters: ZOD images are 3848x2168, so distant
     pedestrians are tiny and get lost at low input resolution.

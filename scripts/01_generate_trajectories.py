@@ -1,10 +1,10 @@
-"""Step 2 — GOLD-tier trajectory generation (frustum measurement + KF/RTS linker).
+"""Step 1 — GOLD-tier trajectory generation (frustum measurement + KF/RTS linker).
 
 Tracks each KEYFRAME-ANNOTATED pedestrian once over its full 20 s clip and writes a per-
 pedestrian world-frame trajectory. This is the GOLD tier: every track is anchored on the
 verified ZOD keyframe box (known position + identity), so there is no track-birth / identity
 problem — that is deferred to the SILVER tier (detector-discovered peds). See docs/PIPELINE.md
-"Step 2 — Direction & open options".
+"Step 1 — Direction & open options".
 
 Architecture (DETECTOR-AS-MEASUREMENT + KF/RTS-AS-LINKER):
   1. Per sequence, build a CANDIDATE POOL once: for every LiDAR scan, run the 2D detector on the
@@ -24,9 +24,9 @@ Output: data/processed/trajectories/{seq_id}_{pedestrian_id}.json
 Note: position_ego_rel is per-window and is added at sample assembly, NOT here.
 
 Usage:
-    python scripts/02_generate_trajectories.py --max-seqs 2        # smoke test
-    python scripts/02_generate_trajectories.py                     # full GOLD set
-    python scripts/02_generate_trajectories.py --conf 0.1 --imgsz 2560 --gate-mahal2 9.0
+    python scripts/01_generate_trajectories.py --max-seqs 2        # smoke test
+    python scripts/01_generate_trajectories.py                     # full GOLD set
+    python scripts/01_generate_trajectories.py --conf 0.1 --imgsz 2560 --gate-mahal2 9.0
 """
 
 from __future__ import annotations
@@ -206,7 +206,7 @@ def main() -> None:
               "min_pts": args.min_pts, "gate_mahal2": args.gate_mahal2,
               "max_consecutive_misses": args.max_misses, "meas_sigma": args.meas_sigma,
               "max_gap_s": args.max_gap, "tier": "gold"}
-    print(f"Step 2 (GOLD): tracking pedestrians over {len(seq_ids)} sequences → {args.out_dir}")
+    print(f"Step 1 (GOLD): tracking pedestrians over {len(seq_ids)} sequences → {args.out_dir}")
 
     summaries: List[dict] = []
     failures: List[dict] = []
@@ -223,7 +223,7 @@ def main() -> None:
 
     report = {"config": config, "n_sequences": len(seq_ids), "n_trajectories": total_written,
               "per_sequence": summaries, "failures": failures}
-    report_path = args.out_dir / "_step2_report.json"
+    report_path = args.out_dir / "_run_report.json"
     report_path.write_text(json.dumps(report, indent=2))
     print(f"\nDone. {total_written} trajectories from {len(seq_ids)} sequences "
           f"({len(failures)} failed). Report → {report_path}")

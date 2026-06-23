@@ -1,9 +1,9 @@
 """Frustum lift — a 2D detector box → a 3D position via in-frustum LiDAR depth.
 
-This is the Step 2 MEASUREMENT source (see docs/PIPELINE.md "Direction & open options"): a
+This is the Step 1 MEASUREMENT source (see docs/PIPELINE.md "Direction & open options"): a
 strong COCO 2D detector recalls pedestrians well where an off-the-shelf 3D detector does not, so
 we recover the 3D *position* by intersecting each 2D box with the LiDAR. Both the bring-up POC
-(`scripts/frustum_poc.py`) and the Step 2 driver (`scripts/02_generate_trajectories.py`) consume
+(`scripts/frustum_poc.py`) and the Step 1 driver (`scripts/01_generate_trajectories.py`) consume
 this module, so the 2D→3D logic lives in exactly one place (mirrors `src/dataset/keyframe.py`).
 
 The lift runs in the LiDAR sensor frame (project points to the image with the static cam←lidar

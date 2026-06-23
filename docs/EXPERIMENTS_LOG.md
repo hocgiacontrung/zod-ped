@@ -1,4 +1,4 @@
-# Experiments Log — Step 2 detector bring-up gates
+# Experiments Log — trajectory detector bring-up gates
 
 Durable record of the detector experiments run during Week 2 (2026-06-17/18). The raw
 reports live under `data/processed/*.json` (gitignored, kept on disk); this file is the
@@ -6,22 +6,16 @@ committed summary. The dead 3D-detector code (OpenPCDet / PointPillars) was remo
 the working tree on 2026-06-18 — recover it from the `experiments/3d-detectors` tag.
 
 ## Why this log exists
-After review (supervisor meeting, 2026-06-18) the project **pivots away from off-the-shelf
-3D detectors**. These numbers are the evidence for that decision. New direction:
-1. Drop the old 3D detectors (PointPillars / OpenPCDet). If a 3D model is needed, use a
-   modern one (e.g. SAM4D, 2025).
-2. Keep the 2D+3D combination. Improve the **2D** front-end (e.g. Detectron2), then use ZOD
-   calibration/projection to lift detections to 3D (the **frustum** approach below).
+After review (2026-06-18) the project **pivots away from off-the-shelf 3D detectors**. These numbers are the evidence for that decision. New direction:
+1. Drop the old 3D detectors (PointPillars / OpenPCDet). If a 3D model is needed, use a modern one (e.g. SAM4D, 2025).
+2. Keep the 2D+3D combination. Improve the **2D** front-end (e.g. Detectron2), then use ZOD calibration/projection to lift detections to 3D (the **frustum** approach below).
 3. Expect 2D good, 3D weaker; if 3D is inadequate, hand-annotate a few sequences to fine-tune.
 4. Not locked to ZOD — evaluate other datasets if better/easier/better-annotated.
 
 ## Common protocol
-- Same **1,830** keyframe 3D GT boxes (358 pedestrian seqs, 352 evaluated, 6 failed) for all
-  3D/frustum gates; 2D gate uses **2,159** GT 2D boxes (includes the 296 "2D-only" peds).
+- Same **1,830** keyframe 3D GT boxes (358 pedestrian seqs, 352 evaluated, 6 failed) for all 3D/frustum gates; 2D gate uses **2,159** GT 2D boxes (includes the 296 "2D-only" peds).
 - 3D match: BEV centre, 2 m gate. 2D match: IoU ≥ 0.5. Score/conf threshold 0.1.
-- "Compensated" = LiDAR motion-compensated to the camera keyframe instant (see
-  `src/dataset/keyframe.py::motion_compensate_to_keyframe`); fixes a ~5 cm median /
-  ~19 cm p90 ego-motion bias from the +37 ms scan offset.
+- "Compensated" = LiDAR motion-compensated to the camera keyframe instant (see `src/dataset/keyframe.py::motion_compensate_to_keyframe`); fixes a ~5 cm median/ ~19 cm p90 ego-motion bias from the +37 ms scan offset.
 
 ## Results
 
@@ -36,22 +30,11 @@ Frustum, uncompensated (kept for reference): recall 0.574 / prec 0.523 / loc med
 / p90 0.703 → compensation cut median −26 %, p90 −27 %.
 
 ## Conclusions
-- **Off-the-shelf PointPillars (either weights) has a severe ZOD domain gap**, worst beyond
-  40 m where **~52 % (949/1830) of GT lives**. KITTI weights (narrow HDL-64E front-FOV
-  domain) are far worse than nuScenes weights. This is a transfer/domain-gap result, not a
-  refutation of PointPillars as a method.
-- **Frustum (2D-driven) beats every off-the-shelf 3D detector** on recall, precision, and
-  range — with zero training — and yields accurate 3D positions (~15 cm median). It is the
-  realisation of the supervisor's "good 2D → calibration/projection → 3D" direction and is
-  **retained** as the Step 2 measurement front-end.
-- 2D's main limiter is occlusion (single-frame; recoverable by the tracker/linker) and small
-  far peds. Upgrading the 2D detector (Detectron2) directly lifts the frustum ceiling.
+- **Off-the-shelf PointPillars (either weights) has a severe ZOD domain gap**, worst beyond 40 m where **~52 % (949/1830) of GT lives**. KITTI weights (narrow HDL-64E front-FOV domain) are far worse than nuScenes weights. This is a transfer/domain-gap result.
+- **Frustum (2D-driven) beats every off-the-shelf 3D detector** on recall, precision, and range — with zero training — and yields accurate 3D positions (~15 cm median). It is the realisation of the "good 2D → calibration/projection → 3D" direction and is **retained** as the Step 1 measurement front-end.
+- 2D's main limiter is occlusion (single-frame; recoverable by the tracker/linker) and small far peds. Upgrading the 2D detector can directly lift the frustum ceiling.
 
 ## Pointers
-- Surviving code: `scripts/frustum_poc.py`, `scripts/eval_detector2d_recall.py`,
-  `scripts/validate_world_frame.py`, `src/dataset/keyframe.py`, `src/utils/projection.py`.
-- Result notebooks kept: `notebooks/03_detector2d_recall_results.ipynb`,
-  `notebooks/04_frustum_poc_results.ipynb`.
-- Removed (in git history @ `experiments/3d-detectors`): `scripts/eval_detector_recall.py`,
-  `notebooks/02_detector_recall_results.ipynb`, `notebooks/05_pointpillars_zhu_results.ipynb`,
-  and the external `~/OpenPCDet` / `~/PointPillars` clones.
+- Surviving code: `scripts/frustum_poc.py`, `scripts/eval_detector2d_recall.py`, `scripts/validate_world_frame.py`, `src/dataset/keyframe.py`, `src/utils/projection.py`.
+- Result notebook kept: `notebooks/02_bringup_gates.ipynb` (Gate A 2D recall + Gate B frustum POC).
+- Removed (in git history @ `experiments/3d-detectors`): `scripts/eval_detector_recall.py`, `notebooks/02_detector_recall_results.ipynb`, `notebooks/05_pointpillars_zhu_results.ipynb`, and the external `~/OpenPCDet` / `~/PointPillars` clones.

@@ -9,13 +9,13 @@ A multimodal pedestrian intent and trajectory prediction dataset built on top of
 intent datasets (JAAD, PIE, PSI) which are camera-only, this dataset includes
 synchronized **camera + LiDAR + radar** data across 14 European countries.
 
-**Status:** Pipeline in development (Week 2)
+**Status:** Generating Trajectories (Week 5)
 
 ## Dataset Foundation
 
 Built on ZOD Sequences (1,473 × ~20s clips). Annotations exist at one keyframe per
 sequence; this project generates pseudo-labels for pedestrian intent and trajectory
-across all frames. Working set: 130 sequences with pedestrian annotations + LiDAR.
+across all frames. Working set: 358 sequences with pedestrian annotations + LiDAR.
 
 ## Setup
 

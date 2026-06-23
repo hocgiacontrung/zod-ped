@@ -1,4 +1,4 @@
-"""Visualize + sanity-check Step 2 trajectories (BEV plot per sequence + numeric table).
+"""Visualize + sanity-check Step 1 trajectories (BEV plot per sequence + numeric table).
 
 For each sequence with trajectories in --traj-dir, draws a bird's-eye (world x-y) plot of the ego
 path and every pedestrian track (observed segments solid, coasted points faded, anchor starred),
