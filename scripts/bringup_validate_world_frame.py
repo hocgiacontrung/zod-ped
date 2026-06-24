@@ -14,8 +14,8 @@ PASS = world spread is small in absolute terms AND much smaller than the uncompe
 than the ego's own displacement over the window).
 
 Usage:
-    python scripts/validate_world_frame.py                 # seq 000007 (verified)
-    python scripts/validate_world_frame.py --seq 000123 --window 1.5
+    python scripts/bringup_validate_world_frame.py                 # seq 000007 (verified)
+    python scripts/bringup_validate_world_frame.py --seq 000123 --window 1.5
 """
 
 from __future__ import annotations
@@ -28,16 +28,13 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from dataset.keyframe import (  # noqa: E402
-    lidar_ts_from_filename,
-    load_xyzi,
-    parse_zod_ts,
+from zodped.dataset.keyframe import lidar_ts_from_filename, load_xyzi, parse_zod_ts
+from zodped.utils.ego_motion import (
+    get_T_world_lidar, interpolate_pose, load_ego_motion, transform_points,
 )
-from utils.ego_motion import get_T_world_lidar, interpolate_pose, load_ego_motion, transform_points  # noqa: E402
-from utils.projection import load_calibration  # noqa: E402
+from zodped.utils.projection import load_calibration
+
+ROOT = Path(__file__).resolve().parents[1]
 
 SEQ_DIR = ROOT / "data" / "raw" / "sequences"
 

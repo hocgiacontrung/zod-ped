@@ -1,6 +1,6 @@
 """Gate #3 — 2D detector recall against the keyframe pedestrian boxes (image plane).
 
-Counterpart to the frustum POC (`scripts/frustum_poc.py`, the 2D->3D gate). A COCO-trained 2D
+Counterpart to the frustum POC (`scripts/bringup_frustum_poc.py`, the 2D->3D gate). A COCO-trained 2D
 detector ("person" class) is run on each sequence's KEYFRAME CAMERA IMAGE and matched by
 IoU to the verified keyframe 2D pedestrian boxes. Two reasons this is a cleaner experiment
 than a 3D-detector gate:
@@ -13,79 +13,31 @@ Recall is broken down by GT box HEIGHT (px) — the image-plane proxy for range/
 recall degrades along — and by occlusion. Output mirrors the 3D gate's report schema.
 
 Usage:
-    python scripts/eval_detector2d_recall.py                       # yolo11x, all sequences
-    python scripts/eval_detector2d_recall.py --max-seqs 5          # smoke test
-    python scripts/eval_detector2d_recall.py --model yolo11m.pt --conf 0.25 --iou-thresh 0.5
+    python scripts/bringup_eval_detector2d_recall.py                       # yolo11x, all sequences
+    python scripts/bringup_eval_detector2d_recall.py --max-seqs 5          # smoke test
+    python scripts/bringup_eval_detector2d_recall.py --model yolo11m.pt --conf 0.25 --iou-thresh 0.5
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 
+from zodped.dataset.keyframe import GtBox2D, keyframe_image_path, load_keyframe_pedestrians_2d
+from zodped.labeling.detector import Detection2D, make_detector
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from dataset.keyframe import (  # noqa: E402
-    GtBox2D,
-    keyframe_image_path,
-    load_keyframe_pedestrians_2d,
-)
-
 SEQ_DIR = ROOT / "data" / "raw" / "sequences"
 PED_SEQUENCES = ROOT / "data" / "pedestrian_sequences.json"
-DEFAULT_OUTPUT = ROOT / "data" / "processed" / "detector2d_recall_report.json"
+DEFAULT_OUTPUT = ROOT / "data" / "processed" / "reports" / "detector2d_recall_report.json"
 
 # GT box height bins (px) — the image-plane analogue of the 3D gate's range bins.
 HEIGHT_BINS = [0, 40, 80, 160, 320, np.inf]
-COCO_PERSON_CLASS = 0
-
-
-@dataclass
-class Detection2D:
-    """A predicted 2D box in image pixels (x1, y1, x2, y2)."""
-
-    xyxy: np.ndarray
-    score: float
-
-
-def make_detector(model_name: str = "yolo11x.pt", conf: float = 0.25, imgsz: int = 1280,
-                  person_class: int = COCO_PERSON_CLASS):
-    """Build a COCO detector once and return a per-image `(path) -> List[Detection2D]` closure.
-
-    Dispatches on `model_name`: a `rtdetr*` name loads ultralytics' RT-DETR, anything else
-    loads YOLO. Both share the same `.predict(...)` / `.boxes` interface, so the gate code and
-    the Step 1 driver are detector-agnostic and the two are an apples-to-apples comparison.
-
-    `imgsz=1280` (vs the 640 default) matters: ZOD images are 3848x2168, so distant
-    pedestrians are tiny and get lost at low input resolution.
-    """
-    is_rtdetr = Path(model_name).name.lower().startswith("rtdetr")
-    try:
-        from ultralytics import RTDETR, YOLO
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Could not import ultralytics. `pip install ultralytics`. {exc!r}") from exc
-
-    model = (RTDETR if is_rtdetr else YOLO)(model_name)
-
-    def detector(image_path: Path) -> List[Detection2D]:
-        res = model.predict(source=str(image_path), imgsz=imgsz, conf=conf,
-                            classes=[person_class], verbose=False, device=0)[0]
-        xyxy = res.boxes.xyxy.cpu().numpy()
-        scores = res.boxes.conf.cpu().numpy()
-        return [Detection2D(xyxy=b, score=float(s)) for b, s in zip(xyxy, scores)]
-
-    return detector
-
-
-# Back-compat alias: earlier code (e.g. scripts/frustum_poc.py) imports `make_yolo`.
-make_yolo = make_detector
 
 
 def iou_one_to_many(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
@@ -242,7 +194,7 @@ def main() -> None:
     if args.max_seqs:
         seq_ids = seq_ids[: args.max_seqs]
 
-    detector = make_yolo(args.model, conf=args.conf, imgsz=args.imgsz)
+    detector = make_detector(args.model, conf=args.conf, imgsz=args.imgsz)
     config = {"detector": "yolo2d", "model": args.model, "conf": args.conf,
               "iou_thresh": args.iou_thresh, "imgsz": args.imgsz,
               "n_sequences_requested": len(seq_ids)}

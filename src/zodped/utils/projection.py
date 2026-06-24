@@ -156,22 +156,16 @@ def is_point_in_road_polygon(
         AND is visible in the image.
     """
     try:
-        from shapely.geometry import Point, Polygon
+        from shapely import contains_xy, union_all
+        from shapely.geometry import Polygon
     except ImportError:
-        raise ImportError("shapely is required for polygon containment checks: pip install shapely")
+        raise ImportError("shapely>=2.0 is required for polygon containment checks: pip install shapely")
 
     uv, valid = project_lidar_to_image(points, calib)
 
-    polys = []
-    for entry in road_polygons:
-        outer_ring = entry["geometry"]["coordinates"][0]
-        polys.append(Polygon(outer_ring))
+    road = union_all([Polygon(entry["geometry"]["coordinates"][0]) for entry in road_polygons])
 
     result = np.zeros(len(points), dtype=bool)
-    valid_indices = np.where(valid)[0]
-    for i, idx in enumerate(valid_indices):
-        pt = Point(uv[i, 0], uv[i, 1])
-        if any(poly.contains(pt) for poly in polys):
-            result[idx] = True
-
+    if len(uv):  # contains_xy is vectorized over the visible points in one call
+        result[valid] = contains_xy(road, uv[:, 0], uv[:, 1])
     return result

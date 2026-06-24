@@ -15,19 +15,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
+from zodped.dataset.keyframe import parse_zod_ts
+from zodped.utils.ego_motion import interpolate_pose, load_ego_motion
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from dataset.keyframe import parse_zod_ts  # noqa: E402
-from utils.ego_motion import interpolate_pose, load_ego_motion  # noqa: E402
-
 SEQ_DIR = ROOT / "data" / "raw" / "sequences"
+DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
+DEFAULT_REVIEW_DIR = ROOT / "data" / "processed" / "review"
 
 
 def _ego_world_xy(seq_id: str, keyframe_ts: float) -> tuple:
@@ -58,15 +57,21 @@ def _ped_stats(doc: dict, ego_kf_xy: np.ndarray) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--traj-dir", type=Path, default=ROOT / "data" / "processed" / "trajectories_verify")
+    ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR, help="per-ped trajectory JSONs")
+    ap.add_argument("--out-dir", type=Path, default=DEFAULT_REVIEW_DIR, help="where BEV review PNGs are written")
+    ap.add_argument("--seq", default=None, help="render only this sequence id (default: all)")
     ap.add_argument("--jump-warn", type=float, default=1.5, help="max_step (m) above which a track is flagged")
     args = ap.parse_args()
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    files = sorted(f for f in args.traj_dir.glob("*.json") if not f.name.startswith("_"))
+    pattern = f"{args.seq}_*.json" if args.seq else "*.json"
+    files = sorted(f for f in args.traj_dir.glob(pattern) if not f.name.startswith("_"))
+    if not files:
+        raise SystemExit(f"No trajectories matching {pattern!r} in {args.traj_dir}")
     by_seq = defaultdict(list)
     for f in files:
         d = json.loads(f.read_text())
@@ -101,12 +106,12 @@ def main() -> None:
         ax.set_xlabel("world x (m)"); ax.set_ylabel("world y (m)")
         ax.set_title(f"seq {seq_id} — {len(docs)} GOLD peds (★=keyframe anchor, faded=coasted)")
         ax.legend(loc="best", fontsize=8)
-        out = args.traj_dir / f"bev_{seq_id}.png"
+        out = args.out_dir / f"bev_{seq_id}.png"
         fig.savefig(out, dpi=110, bbox_inches="tight"); plt.close(fig)
 
     print("-" * 72)
     print(f"{len(files)} trajectories, {len(by_seq)} sequences. "
-          f"{n_flag} flagged (max_step > {args.jump_warn} m). BEV plots → {args.traj_dir}/bev_*.png")
+          f"{n_flag} flagged (max_step > {args.jump_warn} m). BEV plots → {args.out_dir}/bev_*.png")
 
 
 if __name__ == "__main__":

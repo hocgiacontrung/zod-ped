@@ -9,7 +9,7 @@
 [pedestrian_sequences.json — sequences with LiDAR on disk]
         ↓
 [Step 1] Trajectory Generation  (scripts/01_generate_trajectories.py)
-  - Unit of work: the PEDESTRIAN (one track per pedestrian), NOT the window. Derives the (seq, ped) set directly from the keyframe annotations (src/dataset/keyframe.py) and tracks each once over the full 20s clip.
+  - Unit of work: the PEDESTRIAN (one track per pedestrian), NOT the window. Derives the (seq, ped) set directly from the keyframe annotations (src/zodped/dataset/keyframe.py) and tracks each once over the full 20s clip.
   - Measurement = 2D detector box → frustum-lifted to 3D; linker = KF/RTS (associate + coast + smooth); every scan ego-motion-compensated to world frame first. Mechanics → "Architecture".
   - Two tiers: GOLD (keyframe-anchored) / SILVER (detector-found). See "Two-tier labels".
   - Output: per-pedestrian world-frame trajectory → data/processed/trajectories/{seq_id}_{pedestrian_id}.json (position_ego_rel is per-window → added later)
@@ -61,8 +61,8 @@ Design choices (debatable): a learned detector localizes each frame independentl
 > primary tracker because the CV model invents position and lags at stop/start, and the centroid is
 > biased toward the LiDAR-facing surface. The KF/RTS *linker* from that design is reused verbatim —
 > only the measurement source changed (centroid → detector box). The gated-centroid measurement
-> survives only as a **coast fallback** when the detector is empty. Kept in
-> `src/labeling/tracker.py`; the full gated-centroid run was NOT executed.
+> code was **removed** from `src/zodped/labeling/tracker.py` (2026-06-24). It is recoverable from git history if a real centroid fallback is
+> ever wanted.
 
 ## Direction & open options (updated 2026-06-18, supervisor review)
 

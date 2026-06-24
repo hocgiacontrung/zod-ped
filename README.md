@@ -22,6 +22,7 @@ across all frames. Working set: 358 sequences with pedestrian annotations + LiDA
 ```bash
 conda activate zod-iac
 pip install -r requirements.txt
+pip install -e . --no-deps    # register the `zodped` library (editable; no sys.path hacks)
 ```
 
 Data must be downloaded separately via the ZOD CLI. See `docs/DATA_FORMAT.md`.
@@ -29,10 +30,10 @@ Data must be downloaded separately via the ZOD CLI. See `docs/DATA_FORMAT.md`.
 ## Project Structure
 
 ```
-src/          pipeline source code
-scripts/      one-off utility scripts
+src/zodped/   importable library (pip install -e .): dataset, labeling, utils
+scripts/      runnable entry-points (pipeline steps, viz/demo, bring-up gates)
 notebooks/    exploration and analysis
-configs/      pipeline parameters
+configs/      pipeline parameters + dataset schema
 docs/         data format reference, pipeline design, schema
 ```
 

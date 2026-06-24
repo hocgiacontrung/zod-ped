@@ -6,7 +6,7 @@ poorly to ZOD, but a COCO 2D detector (YOLO) recalls pedestrians well. Can we ge
 
 Pipeline, per sequence (keyframe only):
   1. YOLO on the keyframe IMAGE -> 2D pedestrian boxes.
-  2. Project the nearest keyframe LiDAR scan into the image (Kannala, src/utils/projection).
+  2. Project the nearest keyframe LiDAR scan into the image (Kannala, zodped.utils.projection).
   3. For each 2D box, gather the LiDAR points whose projection lands inside it (the frustum).
   4. Estimate the pedestrian's 3D centre from those points via a NEAREST-DEPTH SLAB (reject
      the building/road behind and keep the closest compact cluster), median for robustness.
@@ -17,37 +17,35 @@ The localization error is the key new number: it says whether 2D+LiDAR yields *a
 positions, not just whether a pedestrian is somewhere in the frustum.
 
 Usage:
-    python scripts/frustum_poc.py --max-seqs 5         # smoke test
-    python scripts/frustum_poc.py                      # full set
-    python scripts/frustum_poc.py --conf 0.1 --imgsz 2560 --box-shrink 0.6 --slab 1.5
+    python scripts/bringup_frustum_poc.py --max-seqs 5         # smoke test
+    python scripts/bringup_frustum_poc.py                      # full set
+    python scripts/bringup_frustum_poc.py --conf 0.1 --imgsz 2560 --box-shrink 0.6 --slab 1.5
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from dataset.keyframe import (  # noqa: E402
+from zodped.dataset.keyframe import (
     MAX_LIDAR_GAP_S, GtBox, keyframe_image_path, lidar_ts_from_filename,
     load_keyframe_pedestrians, load_xyzi, motion_compensate_to_keyframe,
     nearest_lidar_scan, parse_zod_ts, points_in_box,
 )
-from labeling.frustum import lift_box_to_3d  # noqa: E402
-from utils.projection import load_calibration, project_lidar_to_image  # noqa: E402
+from zodped.labeling.detector import make_detector
+from zodped.labeling.frustum import lift_box_to_3d
+from zodped.utils.projection import load_calibration, project_lidar_to_image
+
+ROOT = Path(__file__).resolve().parents[1]
 
 SEQ_DIR = ROOT / "data" / "raw" / "sequences"
 PED_SEQUENCES = ROOT / "data" / "pedestrian_sequences.json"
-DEFAULT_OUTPUT = ROOT / "data" / "processed" / "frustum_poc_report.json"
+DEFAULT_OUTPUT = ROOT / "data" / "processed" / "reports" / "frustum_poc_report.json"
 
 RANGE_BINS = [0.0, 10.0, 20.0, 30.0, 40.0, np.inf]
 POINT_BINS = [1, 5, 10, 20, 50, np.inf]
@@ -212,8 +210,7 @@ def main() -> None:
     ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = ap.parse_args()
 
-    from eval_detector2d_recall import make_yolo  # noqa: E402
-    detector = make_yolo(args.model, conf=args.conf, imgsz=args.imgsz)
+    detector = make_detector(args.model, conf=args.conf, imgsz=args.imgsz)
 
     seq_ids = [e["seq_id"] for e in json.loads(PED_SEQUENCES.read_text())]
     if args.max_seqs:

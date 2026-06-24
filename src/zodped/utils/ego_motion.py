@@ -10,9 +10,7 @@ ego_motion.json layout:
 from __future__ import annotations
 
 import json
-
 from pathlib import Path
-
 from typing import Union
 
 import numpy as np

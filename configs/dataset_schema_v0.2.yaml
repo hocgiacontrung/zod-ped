@@ -1,14 +1,17 @@
 # ============================================================
 # ZOD Pedestrian Intent & Trajectory Dataset — Schema v0.2
-# Last updated: 2026-06-23
+# Last updated: 2026-06-24
 #
 # SUPERSEDES v0.1 (configs/dataset_schema_v0.1.yaml), which is kept frozen as the
 # supervisor-approved Week-1 snapshot. This file is the LIVE source of truth; it reconciles
 # the schema with the post-pivot pipeline reality. Changes vs v0.1:
 #   - filtering: split into Step-1 pedestrian selection vs Step-2 per-window assembly;
 #     require_lidar_detection is no longer a hard filter (GOLD seeds geometrically).
-#   - trajectory.frames: added num_lidar_points and tracking_lost; in_observation re-defined
-#     to mean "detector observed this scan" (false while coasting), matching the tracker output.
+#   - trajectory.frames: added num_lidar_points; in_observation re-defined to mean "detector
+#     observed this scan" (false while coasting), matching the tracker output.
+#   - 2026-06-24: removed trajectory.frames.tracking_lost — it was byte-identical to
+#     `not in_observation` (a coast IS the lost state in this single-pass design); per-doc
+#     trajectory schema bumped v0.1 -> v0.2 and existing outputs migrated.
 #   - trajectory generation notes: 2D detector → frustum lift + KF/RTS linker (was LiDAR
 #     IoU / nearest-neighbor).
 #   - intent: added soft_label.
@@ -145,7 +148,6 @@ sample:
         position_ego_rel: [x, y, z] # meters, relative to ego at window_start
         in_observation: bool       # detector observed this scan; false while COASTING (gate empty)
         num_lidar_points: int      # points in the gate this scan (-1 = coasted, no measurement)
-        tracking_lost: bool        # true while coasting past the last good measurement
         kalman_confidence: float   # from innovation residual; lower = more reliable; 0.0 coasted
         tracking_method: anchor | forward | backward
         # anchor: from ZOD keyframe annotation (highest confidence)

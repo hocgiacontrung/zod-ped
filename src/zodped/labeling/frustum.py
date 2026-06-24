@@ -3,8 +3,8 @@
 This is the Step 1 MEASUREMENT source (see docs/PIPELINE.md "Direction & open options"): a
 strong COCO 2D detector recalls pedestrians well where an off-the-shelf 3D detector does not, so
 we recover the 3D *position* by intersecting each 2D box with the LiDAR. Both the bring-up POC
-(`scripts/frustum_poc.py`) and the Step 1 driver (`scripts/01_generate_trajectories.py`) consume
-this module, so the 2D→3D logic lives in exactly one place (mirrors `src/dataset/keyframe.py`).
+(`scripts/bringup_frustum_poc.py`) and the Step 1 driver (`scripts/01_generate_trajectories.py`) consume
+this module, so the 2D→3D logic lives in exactly one place (mirrors `src/zodped/dataset/keyframe.py`).
 
 The lift runs in the LiDAR sensor frame (project points to the image with the static cam←lidar
 calibration, gather the points under the box, take the nearest-depth slab). `lift_image_detections`
@@ -77,7 +77,7 @@ def lift_image_detections(
 
     Returns the successful lifts; boxes with too few in-frustum points are dropped.
     """
-    from utils.projection import project_lidar_to_image  # src/ is on sys.path via the caller
+    from zodped.utils.projection import project_lidar_to_image
 
     uv, valid = project_lidar_to_image(points_lidar, calib)
     pts_vis = points_lidar[valid]

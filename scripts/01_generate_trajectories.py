@@ -9,10 +9,10 @@ problem — that is deferred to the SILVER tier (detector-discovered peds). See 
 Architecture (DETECTOR-AS-MEASUREMENT + KF/RTS-AS-LINKER):
   1. Per sequence, build a CANDIDATE POOL once: for every LiDAR scan, run the 2D detector on the
      nearest camera image, lift each person box to a 3D world position via the in-frustum LiDAR
-     depth (src/labeling/frustum.py). The pool is pedestrian-independent and shared across the
+     depth (zodped.labeling.frustum). The pool is pedestrian-independent and shared across the
      sequence's GOLD peds (the detector is the expensive part — run it once per frame).
   2. Per pedestrian, seed at the keyframe box (world frame) and run the detector-association
-     linker (src/labeling/tracker.track_pedestrian_from_detections): CV-Kalman predict, gate the
+     linker (zodped.labeling.tracker.track_pedestrian_from_detections): CV-Kalman predict, gate the
      pool's candidates, take the nearest in-gate one as the measurement, coast on misses, RTS smooth.
 
 Frame convention: each pool frame is timestamped at its LiDAR SCAN time (the world transform that
@@ -33,28 +33,26 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from dataset.keyframe import (  # noqa: E402
+from zodped.dataset.keyframe import (
     MAX_LIDAR_GAP_S, GtBox, lidar_ts_from_filename, load_keyframe_pedestrians,
     load_xyzi, parse_zod_ts,
 )
-from labeling.frustum import lift_image_detections  # noqa: E402
-from labeling.tracker import track_pedestrian_from_detections  # noqa: E402
-from utils.ego_motion import get_T_world_lidar, load_ego_motion  # noqa: E402
-from utils.projection import load_calibration  # noqa: E402
+from zodped.labeling.detector import make_detector
+from zodped.labeling.frustum import lift_image_detections
+from zodped.labeling.tracker import track_pedestrian_from_detections
+from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
+from zodped.utils.projection import load_calibration
 
+ROOT = Path(__file__).resolve().parents[1]
 SEQ_DIR = ROOT / "data" / "raw" / "sequences"
 PED_SEQUENCES = ROOT / "data" / "pedestrian_sequences.json"
-DEFAULT_OUT_DIR = ROOT / "data" / "processed" / "trajectories"
+DEFAULT_OUT_DIR = ROOT / "data" / "processed" / "trajectories"          # per-ped track data only
+DEFAULT_REPORT_PATH = ROOT / "data" / "processed" / "reports" / "trajectories_run_report.json"
 
 
 def _image_table(seq_dir: Path, camera: str) -> Tuple[List[Path], np.ndarray]:
@@ -113,7 +111,7 @@ def _trajectory_doc(seq_id: str, box: GtBox, keyframe_iso: str, seed_world: np.n
     """Assemble the per-pedestrian output document (GOLD tier)."""
     n_obs = sum(f["in_observation"] for f in frames)
     return {
-        "schema": "trajectory/v0.1",
+        "schema": "trajectory/v0.2",
         "sequence_id": seq_id,
         "pedestrian_id": box.uuid,
         "label_confidence_tier": "high",
@@ -190,10 +188,10 @@ def main() -> None:
     ap.add_argument("--max-misses", type=int, default=5, help="consecutive coasted frames before a pass ends")
     ap.add_argument("--meas-sigma", type=float, default=0.3, help="frustum measurement noise std (m)")
     ap.add_argument("--max-seqs", type=int, default=None, help="cap sequences (smoke test)")
-    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="per-ped trajectory JSONs (data only)")
+    ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="run report (kept out of the data dir)")
     args = ap.parse_args()
 
-    from eval_detector2d_recall import make_detector  # noqa: E402
     detector = make_detector(args.model, conf=args.conf, imgsz=args.imgsz)
 
     seq_ids = [e["seq_id"] for e in json.loads(PED_SEQUENCES.read_text())]
@@ -205,7 +203,7 @@ def main() -> None:
               "imgsz": args.imgsz, "box_shrink": args.box_shrink, "slab_m": args.slab,
               "min_pts": args.min_pts, "gate_mahal2": args.gate_mahal2,
               "max_consecutive_misses": args.max_misses, "meas_sigma": args.meas_sigma,
-              "max_gap_s": args.max_gap, "tier": "gold"}
+              "max_gap_s": args.max_gap}
     print(f"Step 1 (GOLD): tracking pedestrians over {len(seq_ids)} sequences → {args.out_dir}")
 
     summaries: List[dict] = []
@@ -223,10 +221,10 @@ def main() -> None:
 
     report = {"config": config, "n_sequences": len(seq_ids), "n_trajectories": total_written,
               "per_sequence": summaries, "failures": failures}
-    report_path = args.out_dir / "_run_report.json"
-    report_path.write_text(json.dumps(report, indent=2))
+    args.report_path.parent.mkdir(parents=True, exist_ok=True)
+    args.report_path.write_text(json.dumps(report, indent=2))
     print(f"\nDone. {total_written} trajectories from {len(seq_ids)} sequences "
-          f"({len(failures)} failed). Report → {report_path}")
+          f"({len(failures)} failed). Report → {args.report_path}")
 
 
 if __name__ == "__main__":

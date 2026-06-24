@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zod-ped"
+version = "0.1.0"
+description = "Multimodal pedestrian intent & trajectory dataset on the Zenseact Open Dataset (Aalto internship)"
+requires-python = ">=3.10"
+
+# Runtime dependencies are managed by the conda env `zod-iac` / requirements.txt, not here.
+# Install the library itself in editable mode (no deps) so `import zodped` works without sys.path
+# hacks:  pip install -e . --no-deps
+
+[tool.setuptools.packages.find]
+where = ["src"]

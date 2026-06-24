@@ -113,7 +113,7 @@ Relevant sub-keys:
 LiDAR points and `location_3d` are confirmed to be in the same **LiDAR sensor frame**
 (verified on seq 000007) — no extra transform needed between them.
 To project either into the image, use `T_cam_lidar = inv(extrinsics) @ lidar_extrinsics`.
-See `src/utils/projection.py`.
+See `src/zodped/utils/projection.py`.
 
 ## pedestrian_sequences.json
 ```json

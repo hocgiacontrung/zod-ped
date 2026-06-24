@@ -3,7 +3,7 @@ bring-up experiments.
 
 ZOD annotates a single keyframe per 20s clip. These helpers locate the LiDAR scan nearest the
 keyframe and read the verified pedestrian 3D boxes from it. Both the frustum POC
-(`scripts/frustum_poc.py`) and the Step 1 driver consume this module, so the keyframe
+(`scripts/bringup_frustum_poc.py`) and the Step 1 driver consume this module, so the keyframe
 logic lives in exactly one place. This module is the single source of truth for the
 keyframe (seq, pedestrian) set — it selects pedestrians directly from the annotations
 (`class == "Pedestrian"` with `location_3d`), so nothing upstream needs to pre-enumerate them.
