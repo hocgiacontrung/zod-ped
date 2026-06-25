@@ -3,7 +3,7 @@
 Scans the Step 1 trajectories and ranks pedestrians whose track BRIDGES an occlusion: an internal
 run of coasted frames (detector matched nothing) with observed frames on BOTH sides, i.e. the
 constant-velocity linker carried the track across a gap and re-acquired the same person. These make
-the most convincing demo figures (render the chosen sequence with scripts/viz_render_sequence_video.py).
+the most convincing demo figures (render the chosen sequence with scripts/viz_render_video.py).
 
 A candidate must clear plausibility/quality gates so we don't showcase a broken track:
   * longest bridged gap >= --min-gap frames (the occlusion actually bridged),
@@ -105,7 +105,7 @@ def main() -> None:
     if cands:
         print("\nRender the top candidate's sequence (full-frame video, all peds boxed + marked):")
         top = cands[0]
-        print(f"  python scripts/viz_render_sequence_video.py --seq {top['seq']}")
+        print(f"  python scripts/viz_render_video.py --seq {top['seq']}")
         print(f"  python scripts/viz_trajectories.py --seq {top['seq']}   # BEV + QC table for the same seq")
 
 

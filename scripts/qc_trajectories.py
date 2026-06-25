@@ -25,7 +25,7 @@ counts and by anchor occlusion — which is the data-driven read on "is YOLO11 g
   - low median_lidar_pts on the flagged tracks                  -> frustum starvation / range, not 2D
 
 True per-coast attribution (detector-miss vs gate-reject) needs the candidate pool rebuilt
-(re-run the detector); drill into a specific bad track with scripts/viz_render_sequence_video.py.
+(re-run the detector); drill into a specific bad track with scripts/viz_render_video.py.
 
 Usage:
     python scripts/qc_trajectories.py                       # score all tracks, print queue + summary
