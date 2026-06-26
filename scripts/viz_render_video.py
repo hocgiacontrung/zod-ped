@@ -122,11 +122,12 @@ def _box_holding(boxes, u: float, v: float):
     return min(holding, key=lambda b: (b.xyxy[2] - b.xyxy[0]) * (b.xyxy[3] - b.xyxy[1]))
 
 
-def _point_colors(intensity: np.ndarray, cmap_name: str, floor: float = 0.3) -> np.ndarray:
-    """Map LiDAR log-intensity to RGB (devkit scheme), readable on a white background.
+def _point_colors(intensity: np.ndarray, cmap_name: str, floor: float = 0.0) -> np.ndarray:
+    """Map LiDAR log-intensity to RGB over the colormap's full range (the official-clip look).
 
-    `floor` lifts the low end off the colormap's white tail so faint points stay visible against
-    the white background (mirrors the reddish look of the official ZOD clips).
+    Spanning the full range (rather than crushing it toward one hue) is what makes intensity
+    structure — lane markings, reflective surfaces — pop, giving the clean technical look of the ZOD
+    clips. `floor` optionally lifts the low end off the colormap's dark/light tail; 0 = full range.
     """
     import matplotlib
     v = np.log1p(np.clip(intensity, 0, None))
@@ -236,6 +237,10 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
         from open3d.visualization import rendering
         renderer = rendering.OffscreenRenderer(rwidth * ss, rheight * ss)
         renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])
+        # Disable Filament's default post chain (ACES tonemapping): it maps white 1.0 -> ~0.92, greying
+        # the background and desaturating every point. Off = pure-white bg + literal colours (the crisp
+        # ZOD-clip look). Anti-aliasing is handled by our SSAA (supersample + INTER_AREA), not the post chain.
+        renderer.scene.view.set_post_processing(False)
         renderer.scene.scene.set_sun_light([0.5, 0.5, -1.0], [1, 1, 1], 60000)
         mats["pcd"] = rendering.MaterialRecord(); mats["pcd"].shader = "defaultUnlit"; mats["pcd"].point_size = point_size * ss
         mats["line"] = rendering.MaterialRecord(); mats["line"].shader = "unlitLine"; mats["line"].line_width = 8.0 * ss
@@ -327,8 +332,8 @@ def main() -> None:
     ap.add_argument("--follow-dist", type=float, default=11.0, help="--ped auto-aim: eye distance from ped (m)")
     ap.add_argument("--follow-height", type=float, default=7.0, help="--ped auto-aim: eye height (m)")
     ap.add_argument("--supersample", type=int, default=2, help="SSAA factor for the 3D panel (1=off)")
-    ap.add_argument("--point-size", type=float, default=2.5, help="LiDAR point size (px)")
-    ap.add_argument("--cmap", default="Reds", help="matplotlib colormap for log-intensity")
+    ap.add_argument("--point-size", type=float, default=1.5, help="LiDAR point size (px)")
+    ap.add_argument("--cmap", default="Reds", help="matplotlib colormap for log-intensity (dark-dominant = crisp on white)")
     ap.add_argument("--max-points", type=int, default=250000, help="points kept per scan")
     ap.add_argument("--match-tol", type=float, default=0.08, help="max |frame-track| time gap to draw a ped (s)")
     ap.add_argument("--model", default="yolo11x.pt", help="2D detector weights for the camera-panel boxes")
