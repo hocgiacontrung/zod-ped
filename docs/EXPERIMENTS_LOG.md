@@ -38,3 +38,49 @@ Frustum, uncompensated (kept for reference): recall 0.574 / prec 0.523 / loc med
 - Surviving code: `scripts/bringup_frustum_poc.py`, `scripts/bringup_eval_detector2d_recall.py`, `scripts/bringup_validate_world_frame.py`, `src/zodped/dataset/keyframe.py`, `src/zodped/utils/projection.py`.
 - Result notebook kept: `notebooks/02_bringup_gates.ipynb` (Gate A 2D recall + Gate B frustum POC).
 - Removed (in git history @ `experiments/3d-detectors`): `scripts/eval_detector_recall.py`, `notebooks/02_detector_recall_results.ipynb`, `notebooks/05_pointpillars_zhu_results.ipynb`, and the external `~/OpenPCDet` / `~/PointPillars` clones.
+
+---
+
+## Boxfit cluster experiment (2026-06-26) — REJECTED, kept slab + anchor box
+
+**Question.** Update #1 made the per-frame 3D box a required deliverable. Two open questions: (a)
+should a LiDAR-cluster centroid replace the nearest-depth slab as the tracking measurement, and (b)
+can a cluster supply the box size/orientation? Approach tried: in-frustum points → local ground removal → DBSCAN → nearest qualifying cluster → fit an oriented box; option
+to feed the cluster centre back into the KF/RTS linker.
+
+**Method.** A keyframe GT-box gate (the keyframe is the only frame with a GT 3D box) compared, per
+GOLD pedestrian, the slab vs cluster centroid against GT, plus the fitted cluster box's 3D IoU /
+height / yaw vs GT. 150 sequences, 384 cluster matches.
+
+| metric | slab (baseline) | cluster |
+|---|---:|---:|
+| centre err xy — median | **0.146 m** | 0.154 m |
+| centre err xy — mean | **0.232 m** | 1.304 m |
+| centre err xy — p90 | **0.383 m** | 1.17 m |
+| closer to GT | 51.6 % | 48.4 % |
+
+Cluster box vs GT: 3D IoU median **0.098** (7 % ≥0.25, 0 % ≥0.5); height error median **−0.81 m**;
+PCA yaw error median **63°**.
+
+**Conclusion — REJECTED.** The cluster ties the slab on the median but has a heavy failure tail
+(mean/p90 blow up): for a sparse/occluded pedestrian the body fails to form a qualifying cluster
+while a background blob in the frustum cone does, so "nearest cluster" jumps onto it. The raw cluster box is
+unshippable — sparse points underestimate height by ~0.8 m and a pedestrian's round cross-section
+makes PCA yaw ~random. So **the shipped GOLD box = tracked (slab) centre + keyframe anchor size +
+velocity yaw** (`zodped.labeling.boxes`), and clustering is not in the product. The tail is a
+fixable cluster-*selection* problem (anchor the pick to the slab depth), but even fixed the cluster
+only ties the slab, so it was not worth the complexity. Revisit only for the SILVER tier, which has
+no keyframe anchor and will need a size *prior* (measured extent alone is too short).
+
+**Removed (recover from git history):** `src/zodped/labeling/boxfit.py`,
+`scripts/bringup_boxfit_gate.py`, `scripts/viz_boxfit_diagnostic.py`. Kept and now in the product:
+the Step 0 detection cache (`scripts/00_detect.py`, `src/zodped/labeling/detection_cache.py`) and
+the box assembly (`src/zodped/labeling/boxes.py`).
+
+**Note — the rejection is scoped to Regime A (detector HAS a box).** Two regimes: A) detector box →
+slab wins (above); B) detector MISSES (occlusion) → no box, handled by KF coast + RTS smooth, not
+LiDAR. Don't reach for clustering in B either: camera/LiDAR are co-mounted, so a hard occluder hides
+the ped from both — the cone holds the *occluder*, and "nearest cluster" lands on it. Lesson:
+robustness is the motion prior + gate, not the primitive. SILVER options, cheapest first:
+re-acquisition (gate widen + appearance ReID, cf. OC-SORT), then gated cluster/scene-flow
+segmentation (motion, not density; cf. FlowNet3D) — viable only because the track selects it.

@@ -11,8 +11,10 @@
 [Step 1] Trajectory Generation  (scripts/01_generate_trajectories.py)
   - Unit of work: the PEDESTRIAN (one track per pedestrian), NOT the window. Derives the (seq, ped) set directly from the keyframe annotations (src/zodped/dataset/keyframe.py) and tracks each once over the full 20s clip.
   - Measurement = 2D detector box → frustum-lifted to 3D; linker = KF/RTS (associate + coast + smooth); every scan ego-motion-compensated to world frame first. Mechanics → "Architecture".
+  - 2D detections are CACHED once (Step 0, scripts/00_detect.py → data/processed/detections/) so the cheap geometry/tracking loop re-runs in minutes; re-detect only when the detector config changes.
+  - 3D boxes: the shipped per-frame box = tracked centre + rigid keyframe extent + velocity heading (zodped.labeling.boxes.assemble_track_boxes). A per-frame LiDAR-cluster box (ground removal → DBSCAN → fit, with the cluster centre optionally fed back into tracking) was built, tested, REJECTED — see docs/EXPERIMENTS_LOG.md "Boxfit cluster experiment". So clustering is not in the product; box size/yaw come from the keyframe anchor + motion.
   - Two tiers: GOLD (keyframe-anchored) / SILVER (detector-found). See "Two-tier labels".
-  - Output: per-pedestrian world-frame trajectory → data/processed/trajectories/{seq_id}_{pedestrian_id}.json (position_ego_rel is per-window → added later)
+  - Output: per-pedestrian world-frame trajectory → data/processed/trajectories/{seq_id}_{pedestrian_id}.json (per frame: position + oriented 3D box; position_ego_rel is per-window → added later)
   - Bring-up gates ran BEFORE this was built — see "Bring-up gates".
 
         ↓

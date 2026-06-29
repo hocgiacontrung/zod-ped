@@ -12,8 +12,7 @@
 #   - 2026-06-24: removed trajectory.frames.tracking_lost — it was byte-identical to
 #     `not in_observation` (a coast IS the lost state in this single-pass design); per-doc
 #     trajectory schema bumped v0.1 -> v0.2 and existing outputs migrated.
-#   - trajectory generation notes: 2D detector → frustum lift + KF/RTS linker (was LiDAR
-#     IoU / nearest-neighbor).
+#   - trajectory generation notes: 2D detector → frustum lift + KF/RTS linker (was LiDAR IoU / nearest-neighbor).
 #   - intent: added soft_label.
 #   - dataset_stats: basis is the 358-sequence working set; totals PENDING recomputation.
 #
@@ -150,6 +149,17 @@ sample:
         num_lidar_points: int      # points in the gate this scan (-1 = coasted, no measurement)
         kalman_confidence: float   # from innovation residual; lower = more reliable; 0.0 coasted
         tracking_method: anchor | forward | backward
+
+        # The shipped oriented 3D box (Step 1, zodped.labeling.boxes.assemble_track_boxes):
+        #   centre = tracked position; size = keyframe anchor extent (rigid per ped);
+        #   yaw = heading of the smoothed velocity. A per-frame LiDAR-cluster box was evaluated and
+        #   rejected (docs/EXPERIMENTS_LOG.md "Boxfit cluster experiment"): cluster size/yaw from
+        #   sparse points are unusable, and the cluster centre is no better than the tracked one.
+        box:
+          center_world: [x, y, z]  # meters; equals position_world for GOLD
+          size_lwh: [l, w, h]      # meters; keyframe anchor extent (constant over the track)
+          yaw_world: float         # radians, ground-plane heading
+          yaw_source: velocity | static_fill | undefined
         # anchor: from ZOD keyframe annotation (highest confidence)
         # forward: propagated forward from the seed
         # backward: propagated backward from the seed

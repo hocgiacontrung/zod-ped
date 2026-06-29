@@ -5,9 +5,10 @@ Two layouts (`--layout`):
 * ``split`` (default) — the ZOD-website look: a wide side-by-side frame with the FRONT CAMERA on the
   left and an oblique 3D PERSPECTIVE point-cloud render on the right (white background, LiDAR coloured
   by log-intensity, same scheme as the devkit's ``zod/cli/visualize_lidar.py``). On the cloud we draw
-  each GOLD pedestrian as an oriented 3D box at its tracked world centroid (heading from the track's
-  velocity, size from the keyframe anchor box), dimmed to a thin wireframe while the track is COASTING
-  through an occlusion. The same centroid is projected back onto the camera image so the panels are
+  each GOLD pedestrian as the per-frame 3D box Step 1 shipped (zodped.labeling.boxes: tracked
+  centroid, rigid keyframe-anchor extent, velocity heading), dimmed to a thin wireframe while the
+  track is COASTING through an occlusion and drawn grey when its heading is a placeholder
+  (yaw_source == "undefined", i.e. a wholly-stationary track). The same centroid is projected back onto the camera image so the panels are
   linked. The 3D panel uses Open3D's headless OFFSCREEN renderer (EGL) and is supersampled for crisp,
   anti-aliased points.
 
@@ -37,6 +38,7 @@ import cv2
 import numpy as np
 
 from zodped.dataset.keyframe import lidar_ts_from_filename, load_xyzi, parse_zod_ts
+from zodped.labeling.detection_cache import cache_path, cached_detector, load_detections
 from zodped.labeling.detector import make_detector
 from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration, project_lidar_to_image
@@ -46,6 +48,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SEQ_DIR = ROOT / "data" / "raw" / "sequences"
 DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
 DEFAULT_REVIEW_DIR = ROOT / "data" / "processed" / "review"
+DEFAULT_DET_DIR = ROOT / "data" / "processed" / "detections"          # Step 0 2D-box cache
 
 # Distinct per-pedestrian box colours (RGB 0-1), chosen to contrast with the reddish point cloud.
 _PALETTE = [
@@ -56,7 +59,12 @@ _PALETTE = [
 
 
 def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str]) -> List[dict]:
-    """Load GOLD tracks for one sequence as time arrays + anchor size + per-frame world velocity."""
+    """Load GOLD tracks for one sequence as the per-frame SHIPPED 3D box (centre/yaw/size) + obs flag.
+
+    Reads the box Step 1 wrote (zodped.labeling.boxes) verbatim, so the render shows the exact
+    artifact in the dataset rather than a recomputed look-alike. `size_lwh` is rigid per pedestrian,
+    so it is taken from the first frame.
+    """
     tracks = []
     for f in sorted(traj_dir.glob(f"{seq}_*.json")):
         if f.name.startswith("_"):
@@ -66,23 +74,24 @@ def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str]) -> List
         if ped_filter and not pid.startswith(ped_filter):
             continue
         frames = doc["frames"]
-        ts = np.array([parse_zod_ts(fr["timestamp"]) for fr in frames])
-        pos = np.array([fr["position_world"] for fr in frames])
-        vel = np.gradient(pos, axis=0) if len(pos) > 1 else np.zeros_like(pos)  # world m/frame
         tracks.append({
-            "id": pid[:8], "ts": ts, "pos": pos, "vel": vel,
+            "id": pid[:8],
+            "ts": np.array([parse_zod_ts(fr["timestamp"]) for fr in frames]),
+            "pos": np.array([fr["box"]["center_world"] for fr in frames]),
+            "yaw": np.array([fr["box"]["yaw_world"] for fr in frames]),
+            "yaw_source": [fr["box"]["yaw_source"] for fr in frames],
             "obs": np.array([fr["in_observation"] for fr in frames]),
-            "size_lwh": np.array(doc["anchor"]["box_size_lwh"], dtype=float),
+            "size_lwh": np.array(frames[0]["box"]["size_lwh"], dtype=float),
         })
     return tracks
 
 
-def _state_at(track: dict, ts: float, tol: float) -> Optional[Tuple[np.ndarray, np.ndarray, bool]]:
-    """(world position, world velocity, in_observation) nearest `ts`, or None if outside tol."""
+def _state_at(track: dict, ts: float, tol: float) -> Optional[Tuple[np.ndarray, float, str, bool]]:
+    """(world centre, world yaw, yaw_source, in_observation) nearest `ts`, or None if outside tol."""
     i = int(np.argmin(np.abs(track["ts"] - ts)))
     if abs(track["ts"][i] - ts) > tol:
         return None
-    return track["pos"][i], track["vel"][i], bool(track["obs"][i])
+    return track["pos"][i], float(track["yaw"][i]), track["yaw_source"][i], bool(track["obs"][i])
 
 
 def _box_corners_lidar(center_l: np.ndarray, heading_l: np.ndarray, size_lwh: np.ndarray) -> np.ndarray:
@@ -253,18 +262,18 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
 
     for ts, scan, img_path in items:
         T_lw = np.linalg.inv(get_T_world_lidar(em, lidar_ext, ts))
-        active = []                              # (track, world_pos, world_vel, observed) present at ts
+        active = []                              # (track, world_pos, world_yaw, yaw_source, observed) at ts
         for t in tracks:
             st = _state_at(t, ts, match_tol)
             if st is not None:
-                active.append((t, st[0], st[1], st[2]))
+                active.append((t, st[0], st[1], st[2], st[3]))
 
         # --- camera panel (full resolution, both layouts) ---
         if img_path not in det_cache:
             det_cache[img_path] = detector(img_path)
         boxes = det_cache[img_path]
         cam = cv2.imread(str(img_path))
-        _draw_camera_panel(cam, boxes, [(t, pos_w, obs) for t, pos_w, _vel, obs in active], T_lw, calib, colors)
+        _draw_camera_panel(cam, boxes, [(t, pos_w, obs) for t, pos_w, _yaw, _src, obs in active], T_lw, calib, colors)
         ch, cw = cam.shape[:2]
 
         if layout == "split":
@@ -274,10 +283,14 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
             pts_l, intensity = raw[:, :3].astype(np.float64), raw[:, 3]
 
             boxes3d, centers = [], []
-            for track, pos_w, vel_w, observed in active:
+            for track, pos_w, yaw_w, yaw_source, observed in active:
                 center_l = (T_lw @ np.append(pos_w, 1.0))[:3]
-                corners = _box_corners_lidar(center_l, T_lw[:3, :3] @ vel_w, track["size_lwh"])
-                col = colors[track["id"]] if observed else colors[track["id"]] * 0.45 + 0.4
+                heading_w = np.array([np.cos(yaw_w), np.sin(yaw_w), 0.0])  # shipped world yaw -> vector
+                corners = _box_corners_lidar(center_l, T_lw[:3, :3] @ heading_w, track["size_lwh"])
+                if yaw_source == "undefined":          # placeholder heading: flag grey, orientation is arbitrary
+                    col = np.array([0.6, 0.6, 0.6])
+                else:
+                    col = colors[track["id"]] if observed else colors[track["id"]] * 0.45 + 0.4
                 boxes3d.append((track["id"], corners, col, observed))
                 centers.append(center_l)
 
@@ -339,9 +352,16 @@ def main() -> None:
     ap.add_argument("--model", default="yolo11x.pt", help="2D detector weights for the camera-panel boxes")
     ap.add_argument("--conf", type=float, default=0.1, help="detector confidence threshold")
     ap.add_argument("--imgsz", type=int, default=2560, help="detector inference image size")
+    ap.add_argument("--det-dir", type=Path, default=DEFAULT_DET_DIR, help="Step 0 2D-detection cache dir")
     args = ap.parse_args()
 
-    detector = make_detector(args.model, conf=args.conf, imgsz=args.imgsz)
+    det_path = cache_path(args.det_dir, args.seq)
+    if det_path.exists():
+        print(f"using Step 0 detection cache: {det_path}")
+        detector = cached_detector(load_detections(det_path, min_conf=args.conf))
+    else:
+        print("no detection cache for this seq → loading live YOLO (run scripts/00_detect.py to cache)")
+        detector = make_detector(args.model, conf=args.conf, imgsz=args.imgsz)
     tag = f"{args.seq}_{args.ped}" if args.ped else args.seq
     prefix = "zod" if args.layout == "split" else "cam"
     out = args.out or DEFAULT_REVIEW_DIR / f"{prefix}_{tag}.mp4"

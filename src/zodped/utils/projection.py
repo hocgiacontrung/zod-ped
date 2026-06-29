@@ -40,11 +40,6 @@ def get_T_cam_lidar(calib: Dict) -> np.ndarray:
     return np.linalg.inv(cam_ext) @ lid_ext          # T[cam←lidar]
 
 
-def get_T_cam_ego(calib: Dict) -> np.ndarray:
-    """4×4 transform: vehicle ego frame → front-camera frame."""
-    return np.linalg.inv(np.array(calib["FC"]["extrinsics"]))
-
-
 # ---------------------------------------------------------------------------
 # Kannala-Brandt fisheye projection
 # ---------------------------------------------------------------------------
@@ -133,39 +128,3 @@ def project_lidar_to_image(
         out = uv_all
 
     return out[valid], valid
-
-
-def is_point_in_road_polygon(
-    points: np.ndarray,
-    road_polygons: list,
-    calib: Dict,
-) -> np.ndarray:
-    """Test whether LiDAR-frame 3D points fall inside the ego_road polygon (image space).
-
-    `ego_road.json` vertices are in image pixel coordinates. We project the 3D points
-    first, then do a 2D point-in-polygon test.
-
-    Args:
-        points:        (N, 3) coordinates in LiDAR sensor frame.
-        road_polygons: list of polygon dicts from `ego_road.json`
-                       (each has `geometry.coordinates` as a list of rings).
-        calib:         Parsed `calibration.json` dict.
-
-    Returns:
-        (N,) boolean mask — True where the projected point is inside any road polygon
-        AND is visible in the image.
-    """
-    try:
-        from shapely import contains_xy, union_all
-        from shapely.geometry import Polygon
-    except ImportError:
-        raise ImportError("shapely>=2.0 is required for polygon containment checks: pip install shapely")
-
-    uv, valid = project_lidar_to_image(points, calib)
-
-    road = union_all([Polygon(entry["geometry"]["coordinates"][0]) for entry in road_polygons])
-
-    result = np.zeros(len(points), dtype=bool)
-    if len(uv):  # contains_xy is vectorized over the visible points in one call
-        result[valid] = contains_xy(road, uv[:, 0], uv[:, 1])
-    return result
