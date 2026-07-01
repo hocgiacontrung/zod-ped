@@ -128,3 +128,32 @@ def project_lidar_to_image(
         out = uv_all
 
     return out[valid], valid
+
+
+def project_world_to_image(
+    points_world: np.ndarray,
+    calib: Dict,
+    T_world_lidar: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Project world-frame points into the front camera, given T[world←lidar] at the capture instant.
+
+    Chains world → LiDAR frame → image. Use the KEYFRAME `T_world_lidar` to test world points against
+    keyframe image-space annotations (e.g. the ego_road polygon).
+
+    Args:
+        points_world: (N, 3) coordinates in the world frame.
+        calib:        parsed calibration.json dict.
+        T_world_lidar: 4×4 T[world←lidar] at the capture instant (e.g. get_T_world_lidar at keyframe).
+
+    Returns:
+        uv:    (N, 2) pixel coordinates ALIGNED with points_world; NaN rows where the point is behind
+               the camera or out of frame (not compressed — unlike project_lidar_to_image).
+        valid: (N,) boolean mask, True where uv is finite.
+    """
+    points_world = np.asarray(points_world, dtype=np.float64)
+    pts_lidar = (np.linalg.inv(T_world_lidar) @ np.c_[points_world, np.ones(len(points_world))].T).T[:, :3]
+    uv_packed, valid = project_lidar_to_image(pts_lidar, calib, return_depth=False)
+
+    uv = np.full((len(points_world), 2), np.nan)
+    uv[valid] = uv_packed
+    return uv, valid

@@ -84,3 +84,53 @@ the ped from both — the cone holds the *occluder*, and "nearest cluster" lands
 robustness is the motion prior + gate, not the primitive. SILVER options, cheapest first:
 re-acquisition (gate widen + appearance ReID, cf. OC-SORT), then gated cluster/scene-flow
 segmentation (motion, not density; cf. FlowNet3D) — viable only because the track selects it.
+
+## Step 2 corridor: straight strip → curved swept path (2026-07-01)
+
+**Bug.** `crosses_ego_corridor` was implemented as an *instantaneous straight strip* ahead of the
+ego's heading at each timestamp (ego-frame `forward∈[0,50], |lateral|≤1.5`), aggregated over the
+track — despite the design (PIPELINE.md, schema) specifying the ego **swept path from
+`ego_motion.poses`**. On a straight drive the two agree; through a turn the strip rotates with the
+ego and sweeps an arc across the world, so any *stationary* bystander on the corner falls inside it
+at some instant and is falsely flagged.
+
+**Evidence.** seq 000041 (a 90° junction turn, ego heading −89° over the 8 s window): the straight
+strip flagged **2/2** determined tracks as crossers; both are people standing on the pavement. The
+curved swept path (ped world position projected onto the ego trajectory polyline; in-corridor when
+the foot is `0..50 m` of arc-length ahead and within the half-width) flags **0/2**.
+
+**Fix (SHIPPED).** `actions.py::_corridor_action` now uses the curved swept path. Dataset-wide the
+corridor crossing count fell **185 → 38** (≈11.5 % → 2.4 % of determined) — the ~147 lost were
+turn/heading artifacts. The 38 survivors are clean: median min-lateral **0.05 m** (all ≤ 1.5 m),
+32/38 with a real detection at `t_c` and a left↔right side change (true traversal). A near-stationary
+ego (`path < 2 m`) yields no swept path → no crossing. `crosses_ego_road` (keyframe polygon) is
+unchanged and kept as the complement. Viz (`viz_render_video.py`) now draws the curved ribbon.
+
+**Open follow-up.** 2.4 % is a small positive class; the broader `ego_road` set is 9.1 %. Confirm
+with supervisor whether the crossing-prediction benchmark uses the strict corridor alone or unions
+in `ego_road` (the union option was considered and deferred).
+
+## Tracker robustness: association in 3D vs 2D-first (2026-07-01, exploratory)
+
+**Symptom.** The linker (`tracker.py`) lifts boxes to 3D then associates in the world frame, so
+identity is decided on the *depth* axis (frustum-noisy) while the reliable 2D box position is thrown
+away at the lift. Implausible speed "kicks" (>4 m/s, faster than a sprint = a filter kick, not real
+motion) appear in **34/1545 (2 %)** GOLD tracks, concentrated in crowds; at the kick the nearest
+*other* GOLD track is ≈0 m away = identity swap.
+
+**Single-sequence A/B — 2D-IoU pre-gate** (before the existing 3D gate, keep only candidates whose 2D
+box is IoU-consistent with the target's last-seen box):
+
+| seq | scene | peak speed base→gate | recall | verdict |
+|-----|-------|----------------------|--------|---------|
+| 000903 | 5 peds, clean pass-by | 4.5 → 0.8 | 93→92 % | **fixed** |
+| 000953 | 3 peds | 4.3 → 0.9 | 64→41 % | fixed kick, recall lost (stale last-box; needs box-forward predict) |
+| 001396 | 4 peds | 4.1 → 4.1 | 96→96 % | unchanged — a frustum **depth-jump**, not a swap (needs anisotropic R) |
+| 000603 | 34-ped crowd | 20→17 kicks | hurt | insufficient — boxes overlap each other → needs appearance **ReID** |
+
+**Reading.** Association is the right lever for pass-bys; the *correct* architecture is **2D-first
+(associate → lift)**, see PIPELINE "Direction & open options" #4. The pre-gate is a patch on the
+current (backwards) ordering; the GOLD-appropriate form is anchor-seeded 2D-first. Depth-jumps and
+crowds are separate problems (measurement noise; ReID). Full anchor-seeded 2D-first A/B on these four
+regimes is pending before committing to a rerun (Step 1 rerun is minutes off the detector cache;
+Step 2 is tier-agnostic and regenerates in minutes).

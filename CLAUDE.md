@@ -10,24 +10,29 @@ Conda env: `zod-iac` | Server: `user20@aalto`
 Build a multimodal pedestrian intent & trajectory prediction dataset on top of Zenseact Open Dataset (ZOD). Key novelty: synchronized camera + LiDAR + radar,
 unlike existing pedestrian intent datasets (JAAD, PIE, PSI) which are camera-only.
 
-## Current Status (Week 2)
+## Current Status (Week 5)
 - [x] 358 sequences with pedestrian annotations identified → `data/pedestrian_sequences.json`
 - [x] All 358 pedestrian sequences now have LiDAR on disk (non-pedestrian LiDAR pruned; 1473 seq dirs total, 358 retain `lidar_velodyne/`) → full working set
 - [x] Dataset schema approved → `docs/PIPELINE.md`
 - [x] Exploration notebook → `notebooks/01_explore_sequence.ipynb` (seq 000007)
 - [x] Projection utility → `src/zodped/utils/projection.py`
 - [x] Trajectory bring-up gates done → **DIRECTION PIVOT** (2026-06-18, supervisor review): off-the-shelf 3D detectors (PointPillars/OpenPCDet) dropped for a severe ZOD domain gap; now **2D-first + frustum lift to 3D**. See "Trajectory Approach" below + `docs/EXPERIMENTS_LOG.md`.
-- [~] **Step 1 – Trajectory generation** (`scripts/01_generate_trajectories.py`) — **GOLD tier BUILT + full 358 run DONE** (re-run 2026-06-29 w/ per-frame boxes): 358 seqs → 1,863 tracks, 0 failures (`data/processed/reports/trajectories_run_report.json`). **Step 0** caches 2D boxes once (`scripts/00_detect.py` → `data/processed/detections/`, all 358 cached; `src/zodped/labeling/detection_cache.py`) so the geometry loop re-runs in minutes — `01` reads the cache, lazy-loads YOLO only on a miss. Measurement = 2D (YOLO11x) → frustum lift to world (`frustum.py`); KF/RTS linker (`tracker.py: track_pedestrian_from_detections`); per-frame 3D **box** = tracked centre + rigid keyframe extent + velocity yaw (`src/zodped/labeling/boxes.py`; a LiDAR-cluster box was tested + REJECTED → EXPERIMENTS_LOG "Boxfit cluster experiment"). QC scorer built: `scripts/qc_trajectories.py` (ranked review queue + flags + occlusion summary, no detector re-run). Demo/QC viz: `viz_render_video.py` (multi-ped MP4; `--layout split` showcase [default] / `--layout camera` QC), `viz_trajectories.py` (BEV + QC table), `viz_find_demo_pedestrians.py`. Linker bridges occlusions only up to `max_consecutive_misses`≈5 frames (~0.44s). **TODO:** run the manual review pass (tooling done), then SILVER tier (detector-discovered peds + track birth/dedup).
-- [ ] **Step 2 – Sample assembly + filter** (`scripts/02_assemble_samples.py`) — materialise per-window samples from the tracks: window grid + data-availability + proximity filters + per-window geometry (`position_ego_rel`)
-- [ ] **Step 3 – Intent labeling** (`scripts/03_label_intent.py`)
+- [x] **Step 1 – Trajectory generation** (`scripts/01_generate_trajectories.py`)
+  **GOLD tier BUILT + full 358 run DONE** (re-run 2026-06-29 w/ per-frame boxes): 358 seqs → 1,863 tracks, 0 failures (`data/processed/reports/trajectories_run_report.json`). **Step 0** caches 2D boxes (`scripts/00_detect.py` → `data/processed/detections/`, all 358 cached; `src/zodped/labeling/detection_cache.py`) so re-runs in minutes. Measurement = 2D (YOLO11x) → frustum lift to world (`frustum.py`); KF/RTS linker (`tracker.py: track_pedestrian_from_detections`); per-frame 3D **box** = tracked centre + rigid keyframe extent + velocity yaw (`src/zodped/labeling/boxes.py`). QC scorer built: `scripts/qc_trajectories.py` (ranked review queue + flags + occlusion summary). 
+  Demo/QC viz: `viz_render_video.py` (multi-ped MP4), `viz_trajectories.py` (BEV + QC table), `viz_find_demo_pedestrians.py`. 
+  Linker bridges occlusions only up to `max_consecutive_misses`≈5 frames (~0.44s). This is **Step 1a GOLD** (anchor-seeded); **Step 1b SILVER** (detector-birth) is the remaining tier work. **TODO:** run the manual review pass.
+- [~] **Step 2 – Action labeling** (`scripts/02_label_action.py`). Per full track: `crosses_ego_corridor` (primary; ego swept path from `ego_motion.poses` + vehicle width, world frame) + `crossing_frame_timestamp` (`t_c`) + `ego_distance_at_crossing_m`; `crosses_ego_road` (complement; project through keyframe camera → `ego_road` polygon). EMPTY tracks → `undetermined` (kept+flagged, never forced). **Action ≠ intent** — keep separate.
+- [ ] **Step 3 – Sample assembly + intent labeling** (`scripts/03_assemble_samples.py`) — TTE-anchored windows from `t_c` + per-window filters (proximity ≤50m ego / ≤15m road, data-availability) + per-window geometry (`position_ego_rel`) + ego context (speed, turn-indicator from `vehicle_data.hdf5`). Intent = forward-looking PREDICTION (crosses within `[window_end, window_end+h]`), derived from Step-2 action — **not** "crosses inside the window".
+- [ ] **Step 4 – Dataset packaging + QA** — manual review queue (built); reference baseline on GOLD as a label sanity check (dataset QA, not the product); sequence-level split.
+- **Tiers live only in Step 1**; Steps 2–4 are tier-agnostic (carry `is_in_gold_standard`). Build vertically on GOLD first, then pour SILVER through the same Steps 2–4. Full workflow → `docs/PIPELINE.md` "Pipeline Overview".
 
 ## Key Gotchas (verified, seq 000007)
-The one that bites: **`location_3d` is in the LiDAR sensor frame**, not ego — despite ZOD docs saying "sensor/ego frame" (so `ego_road.json` is image-pixel, not 3D-comparable —> project first).
+**`location_3d` is in the LiDAR sensor frame** — despite ZOD docs saying "sensor/ego frame" (so `ego_road.json` is image-pixel, not 3D-comparable —> project first).
 Full set — frame conventions, structured-array `.npy`, per-point µs timestamp offset, 2D-only guard, 55ms scan-gap limit → `docs/DATA_FORMAT.md`.
 
 ## Trajectory Approach (pivot 2026-06-18)
 Measurement pivoted from off-the-shelf 3D detectors (**rejected** — severe ZOD domain gap, recall 0.11–0.49) to **2D detector → frustum lift to 3D** (recall 0.585, ~15cm median, zero training), fed into a reused **KF/RTS linker** (CV-Kalman associate + coast, RTS smooth; compensate-before-associate). Unit = pedestrian (tracked once over the full clip), not window. Two tiers: GOLD (keyframe-anchored, verified) / SILVER (detector-found, flagged `is_in_gold_standard=false`).
-Output: per-ped `data/processed/trajectories/{seq_id}_{pedestrian_id}.json` (world frame); `position_ego_rel` is per-window, added in Step 2.
+Output: per-ped `data/processed/trajectories/{seq_id}_{pedestrian_id}.json` (world frame); `position_ego_rel` is per-window, added in Step 3 (sample assembly).
 → Architecture, open options (SAM4D / fine-tune), dataset decision, evidence: `docs/PIPELINE.md` "Direction & open options" + `docs/EXPERIMENTS_LOG.md`.
 
 ## Key Constraints
@@ -46,9 +51,10 @@ zod-ped/
 │   ├── processed/                ← pipeline outputs (subdirs only; no loose files)
 │   │   ├── detections/          ← Step 0 output: cached 2D person boxes per seq ({seq}.json)
 │   │   ├── trajectories/         ← Step 1 output: per-ped world-frame tracks ONLY ({seq}_{ped}.json)
+│   │   ├── actions/             ← Step 2 output: per-track action records ({seq}_{ped}.json)
 │   │   ├── reports/              ← run reports (trajectories_run_report.json, detector/frustum gates)
 │   │   └── review/              ← generated manual-review artifacts (BEV + overlay PNGs)
-│   ├── annotations/              ← generated pseudo-labels (Step 3 output)
+│   ├── annotations/              ← generated per-sample intent labels + index (Step 3 output)
 │   └── pedestrian_sequences.json    ← 358 sequences with pedestrian annotations
 ├── pyproject.toml               ← installable package config; `pip install -e . --no-deps` (then `import zodped` works everywhere — NO sys.path hacks)
 ├── src/zodped/                  ← the importable library (src-layout package)
@@ -59,9 +65,9 @@ zod-ped/
 │   ├── prune_lidar.py            ← delete lidar_velodyne/ for non-pedestrian seqs (run per batch)
 │   ├── 00_detect.py                  ← Step 0: cache 2D detections once (run before Step 1)
 │   ├── qc_trajectories.py            ← Step 1 QC: score tracks + rank manual-review queue
-│   ├── 01_generate_trajectories.py   ← Step 1: trajectory generation (GOLD built; SILVER TODO)
-│   ├── 02_assemble_samples.py        ← Step 2: sample assembly + filter (TODO)
-│   └── 03_label_intent.py            ← Step 3: intent labeling (TODO)
+│   ├── 01_generate_trajectories.py   ← Step 1: trajectory generation (1a GOLD built; 1b SILVER TODO)
+│   ├── 02_label_action.py            ← Step 2: action labeling (track-level, geometric) (TODO)
+│   └── 03_assemble_samples.py        ← Step 3: sample assembly + intent labeling (TTE-anchored) (TODO)
 ├── notebooks/
 │   ├── 01_explore_sequence.ipynb    ← seq 000007 exploration (verified)
 │   └── 02_bringup_gates.ipynb       ← detector-recall + frustum-POC gate results (pivot evidence)

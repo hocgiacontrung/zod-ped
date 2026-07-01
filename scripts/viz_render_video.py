@@ -20,11 +20,20 @@ Both layouts share the camera-panel drawing; identity is a consistent per-pedest
 frames draw a hollow marker labelled "coast", and detector boxes no pedestrian claimed are faint grey.
 Only GOLD tier (keyframe-anchored pedestrians) is drawn; SILVER (detector-found) is not built yet.
 
+Action-QC overlay (Step 2): with ``--ped`` (or ``--show-action``) the Step-2 action record is read and
+the render is annotated so a crossing label can be eyeballed against the geometry — a per-track banner
+(CROSSES CORRIDOR + t_c + range / no-cross + min lateral / undetermined), a red flash on the box and
+frame at the crossing-onset (t_c) frame, and, in ``split``, the ego swept-path CORRIDOR drawn on the
+ground of the 3D panel (the ego's CURVED swept-path ribbon ahead of it — the exact geometry the label
+uses, so it follows the road through turns). This is the manual check for the corridor label: watch the
+box enter (or miss) the orange ribbon. ``--no-action`` disables it.
+
 Usage:
     python scripts/viz_render_video.py --seq 000007
     python scripts/viz_render_video.py --seq 000007 --layout camera --scale 0.5
     python scripts/viz_render_video.py --seq 000007 --window 10 --fps 15
     python scripts/viz_render_video.py --seq 000007 --eye 0 -16 11 --look 0 18 0   # tune view
+    python scripts/viz_render_video.py --seq 000007 --ped 372DE199                 # action-QC one ped
 """
 
 from __future__ import annotations
@@ -49,6 +58,7 @@ SEQ_DIR = ROOT / "data" / "raw" / "sequences"
 DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
 DEFAULT_REVIEW_DIR = ROOT / "data" / "processed" / "review"
 DEFAULT_DET_DIR = ROOT / "data" / "processed" / "detections"          # Step 0 2D-box cache
+DEFAULT_ACTION_DIR = ROOT / "data" / "processed" / "actions"          # Step 2 per-track action record
 
 # Distinct per-pedestrian box colours (RGB 0-1), chosen to contrast with the reddish point cloud.
 _PALETTE = [
@@ -76,6 +86,7 @@ def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str]) -> List
         frames = doc["frames"]
         tracks.append({
             "id": pid[:8],
+            "full_id": pid,
             "ts": np.array([parse_zod_ts(fr["timestamp"]) for fr in frames]),
             "pos": np.array([fr["box"]["center_world"] for fr in frames]),
             "yaw": np.array([fr["box"]["yaw_world"] for fr in frames]),
@@ -84,6 +95,93 @@ def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str]) -> List
             "size_lwh": np.array(frames[0]["box"]["size_lwh"], dtype=float),
         })
     return tracks
+
+
+def load_actions(actions_dir: Path, seq: str, tracks: List[dict]) -> dict:
+    """Map full pedestrian_id -> its Step-2 action record, for the tracks being rendered.
+
+    Missing files are skipped (a track with no action record just gets no banner). Used only for the
+    per-pedestrian action-QC overlay, so we read only the tracks in view, not the whole sequence.
+    """
+    actions: dict = {}
+    for t in tracks:
+        path = actions_dir / f"{seq}_{t['full_id']}.json"
+        if path.exists():
+            actions[t["full_id"]] = json.loads(path.read_text())
+    return actions
+
+
+def _fmt_action(action: dict, keyframe_ts: float) -> Tuple[str, tuple]:
+    """One-line banner text + BGR colour for a track's action record."""
+    pid = action["pedestrian_id"][:8]
+    if action.get("status") != "determined":
+        return f"{pid}: UNDETERMINED (empty track)", (140, 140, 140)
+    if action.get("crosses_ego_corridor"):
+        tc = parse_zod_ts(action["crossing_frame_timestamp"]) - keyframe_ts
+        d = action.get("ego_distance_at_crossing_m")
+        return (f"{pid}: CROSSES CORRIDOR  t_c={tc:+.1f}s  d={d:.1f}m  road={action['crosses_ego_road']}",
+                (60, 200, 60))
+    lat = (action.get("diagnostics") or {}).get("min_lateral_dist_m")
+    lat_s = f"{lat:.2f}m" if lat is not None else "n/a"
+    return f"{pid}: no cross  |lat|min={lat_s}  road={action['crosses_ego_road']}", (40, 190, 235)
+
+
+def _draw_action_banner(img: np.ndarray, actions: List[dict], keyframe_ts: float,
+                        fs: float, crossing_now: bool) -> None:
+    """Overlay the per-track action label(s), and a crossing-onset flash, in place (top-left)."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    y = int(74 * fs)
+    for action in actions:
+        text, col = _fmt_action(action, keyframe_ts)
+        cv2.putText(img, text, (16, y), font, fs * 0.8, (0, 0, 0), max(2, int(4 * fs)), cv2.LINE_AA)
+        cv2.putText(img, text, (16, y), font, fs * 0.8, col, max(1, int(2 * fs)), cv2.LINE_AA)
+        y += int(34 * fs)
+    if crossing_now:                                            # onset frame: red border + tag
+        h, w = img.shape[:2]
+        cv2.rectangle(img, (0, 0), (w - 1, h - 1), (40, 40, 220), max(4, int(8 * fs)))
+        cv2.putText(img, "CROSSING (t_c)", (16, y + int(6 * fs)), font, fs, (40, 40, 220),
+                    max(2, int(3 * fs)), cv2.LINE_AA)
+
+
+def _swept_path_ribbon_world(em: dict, half_width_m: float, z_offset: float) -> dict:
+    """Ego swept-path ribbon in the WORLD frame: left/right rails (3D), arc-length, timestamps.
+
+    The rails are the ego trajectory offset ±half_width perpendicular to its heading, at the ego's own
+    height (so the ribbon lies on the road) + z_offset. Curves WITH the ego through turns — this is the
+    exact geometry actions.py labels against, so watching a box enter the ribbon justifies the label.
+    """
+    poses = np.asarray(em["poses"])
+    xy, z = poses[:, :2, 3], poses[:, 2, 3] + z_offset
+    ts = np.asarray(em["timestamps"])
+    seg = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    tang = np.gradient(xy, axis=0)
+    tang /= (np.linalg.norm(tang, axis=1, keepdims=True) + 1e-9)
+    nrm = np.column_stack([-tang[:, 1], tang[:, 0]])          # left normal to travel
+    left = np.column_stack([xy + half_width_m * nrm, z])
+    right = np.column_stack([xy - half_width_m * nrm, z])
+    return {"left": left, "right": right, "s": s, "ts": ts}
+
+
+def _ribbon_lineset(ribbon: dict, s_ego: float, T_lw: np.ndarray,
+                    lookahead_m: float, min_forward_m: float) -> Optional["object"]:
+    """Open3D LineSet for the swept-path ribbon AHEAD of the ego (arc-length window), in the LiDAR frame."""
+    import open3d as o3d
+    s = ribbon["s"]
+    mask = (s >= s_ego + min_forward_m) & (s <= s_ego + lookahead_m)
+    if int(mask.sum()) < 2:
+        return None
+    left, right = ribbon["left"][mask], ribbon["right"][mask]
+    world = np.vstack([left, right])
+    lidar = (T_lw @ np.c_[world, np.ones(len(world))].T).T[:, :3]
+    m = len(left)
+    lines = [e for i in range(m - 1) for e in ((i, i + 1), (m + i, m + i + 1))]   # the two rails
+    lines += [(i, m + i) for i in range(0, m, max(1, m // 6))]                    # cross ties (depth)
+    ls = o3d.geometry.LineSet()
+    ls.points = o3d.utility.Vector3dVector(lidar)
+    ls.lines = o3d.utility.Vector2iVector(np.array(lines))
+    ls.colors = o3d.utility.Vector3dVector(np.tile([1.0, 0.55, 0.0], (len(lines), 1)))  # orange
+    return ls
 
 
 def _state_at(track: dict, ts: float, tol: float) -> Optional[Tuple[np.ndarray, float, str, bool]]:
@@ -147,12 +245,13 @@ def _point_colors(intensity: np.ndarray, cmap_name: str, floor: float = 0.0) -> 
 
 
 def _draw_camera_panel(img: np.ndarray, boxes, active: List[tuple], T_lw: np.ndarray,
-                       calib: dict, colors: dict) -> None:
+                       calib: dict, colors: dict, highlight_ids: frozenset = frozenset()) -> None:
     """Draw 2D detector boxes + projected track centroids onto a full-res camera image, in place.
 
     `active` is a list of (track, world_position, observed); each tracked centroid is projected
     world -> LiDAR(t) -> image and drawn, highlighting the detector box it falls into. Boxes no
-    pedestrian claimed are drawn faint grey for context.
+    pedestrian claimed are drawn faint grey for context. Tracks in `highlight_ids` (short id) get a
+    red ring — used to flag the crossing-onset (t_c) frame in action-QC mode.
     """
     claimed = set()
     for track, pos_w, observed in active:
@@ -169,6 +268,8 @@ def _draw_camera_panel(img: np.ndarray, boxes, active: List[tuple], T_lw: np.nda
             cv2.rectangle(img, (x1, y1), (x2, y2), bgr, 3)
         cv2.circle(img, (u, v), 14, (255, 255, 255), 4)          # white halo for contrast
         cv2.circle(img, (u, v), 14, bgr, -1 if observed else 3)  # filled when observed, ring when coasting
+        if track["id"] in highlight_ids:                         # crossing-onset (t_c) flag
+            cv2.circle(img, (u, v), 24, (40, 40, 220), 4)
         label = track["id"] if observed else f"{track['id']} coast"
         cv2.putText(img, label, (u + 18, v), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 5, cv2.LINE_AA)
         cv2.putText(img, label, (u + 18, v), cv2.FONT_HERSHEY_SIMPLEX, 1.3, bgr, 2, cv2.LINE_AA)
@@ -181,7 +282,7 @@ def _draw_camera_panel(img: np.ndarray, boxes, active: List[tuple], T_lw: np.nda
 
 def _render_cloud_panel(renderer, mats: dict, ss: int, rwidth: int, rheight: int,
                         pts_l: np.ndarray, intensity: np.ndarray, cmap: str,
-                        boxes3d: List[tuple], look_v, eye_v, up) -> np.ndarray:
+                        boxes3d: List[tuple], look_v, eye_v, up, corridor=None) -> np.ndarray:
     """Render the 3D point-cloud panel (cloud + oriented boxes) to a BGR (rheight, rwidth) image."""
     import open3d as o3d
     renderer.scene.clear_geometry()
@@ -189,6 +290,8 @@ def _render_cloud_panel(renderer, mats: dict, ss: int, rwidth: int, rheight: int
     pcd.points = o3d.utility.Vector3dVector(pts_l)
     pcd.colors = o3d.utility.Vector3dVector(_point_colors(intensity, cmap))
     renderer.scene.add_geometry("cloud", pcd, mats["pcd"])
+    if corridor is not None:                                     # ego swept-path strip (action-QC)
+        renderer.scene.add_geometry("corridor", corridor, mats["corridor"])
     for bid, corners, col, observed in boxes3d:
         renderer.scene.add_geometry(f"box_{bid}", _lineset(corners, col),
                                     mats["line"] if observed else mats["coast"])
@@ -203,7 +306,7 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
                  detector, *, scale: float, rwidth: int, rheight: int, eye, look, up,
                  point_size: float, cmap: str, max_points: int, match_tol: float,
                  ped_filter: Optional[str], follow_dist: float, follow_h: float,
-                 supersample: int) -> int:
+                 supersample: int, actions_dir: Optional[Path], corridor_z: float) -> int:
     """Render the demo MP4 for one sequence in the chosen layout. Returns frames written."""
     seq_dir = SEQ_DIR / seq
     em = load_ego_motion(seq_dir / "ego_motion.json")
@@ -215,6 +318,11 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
     if not tracks:
         raise SystemExit(f"No GOLD trajectories for seq {seq} ({ped_filter=}) in {traj_dir}")
     colors = {t["id"]: np.array(_PALETTE[i % len(_PALETTE)]) for i, t in enumerate(tracks)}
+
+    # Action-QC overlay (Step 2): per-track banner + crossing-onset flag + ego corridor in the 3D panel.
+    actions = load_actions(actions_dir, seq, tracks) if actions_dir else {}
+    action_list = [actions[t["full_id"]] for t in tracks if t["full_id"] in actions]
+    corridor_params = action_list[0]["params"] if action_list else None
 
     imgs = sorted((seq_dir / "camera_front_blur").glob("*.jpg"))
     img_ts = np.array([parse_zod_ts(p.stem.rsplit("_", 1)[-1]) for p in imgs])
@@ -241,7 +349,7 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
     # render it at `supersample`x resolution and area-downscale: cheap SSAA that turns the jagged/grainy
     # point splats into smooth dots. Built only for `split` so `camera` stays Open3D-free.
     ss = max(1, int(supersample))
-    renderer, mats = None, {}
+    renderer, mats, ribbon = None, {}, None
     if layout == "split":
         from open3d.visualization import rendering
         renderer = rendering.OffscreenRenderer(rwidth * ss, rheight * ss)
@@ -254,6 +362,19 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
         mats["pcd"] = rendering.MaterialRecord(); mats["pcd"].shader = "defaultUnlit"; mats["pcd"].point_size = point_size * ss
         mats["line"] = rendering.MaterialRecord(); mats["line"].shader = "unlitLine"; mats["line"].line_width = 8.0 * ss
         mats["coast"] = rendering.MaterialRecord(); mats["coast"].shader = "unlitLine"; mats["coast"].line_width = 3.0 * ss
+        mats["corridor"] = rendering.MaterialRecord(); mats["corridor"].shader = "unlitLine"; mats["corridor"].line_width = 4.0 * ss
+        if corridor_params is not None:
+            ribbon = _swept_path_ribbon_world(em, corridor_params.get("corridor_half_width_m", 1.5), corridor_z)
+
+    # Map each crossing track's full id -> the scheduled item ts nearest its onset (t_c), so exactly
+    # one rendered frame flags the crossing.
+    item_ts = np.array([it[0] for it in items])
+    crossing_ts_by_id: dict = {}
+    for t in tracks:
+        act = actions.get(t["full_id"])
+        if act and act.get("status") == "determined" and act.get("crosses_ego_corridor"):
+            tc = parse_zod_ts(act["crossing_frame_timestamp"])
+            crossing_ts_by_id[t["full_id"]] = item_ts[int(np.argmin(np.abs(item_ts - tc)))]
 
     rng = np.random.default_rng(0)
     det_cache: dict = {}                        # 2D detections cached per image (scans can share one)
@@ -268,12 +389,16 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
             if st is not None:
                 active.append((t, st[0], st[1], st[2], st[3]))
 
+        crossing_now_ids = {fid for fid, cts in crossing_ts_by_id.items() if ts == cts}
+        highlight_short = frozenset(t["id"] for t in tracks if t["full_id"] in crossing_now_ids)
+
         # --- camera panel (full resolution, both layouts) ---
         if img_path not in det_cache:
             det_cache[img_path] = detector(img_path)
         boxes = det_cache[img_path]
         cam = cv2.imread(str(img_path))
-        _draw_camera_panel(cam, boxes, [(t, pos_w, obs) for t, pos_w, _yaw, _src, obs in active], T_lw, calib, colors)
+        _draw_camera_panel(cam, boxes, [(t, pos_w, obs) for t, pos_w, _yaw, _src, obs in active],
+                           T_lw, calib, colors, highlight_short)
         ch, cw = cam.shape[:2]
 
         if layout == "split":
@@ -287,7 +412,9 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
                 center_l = (T_lw @ np.append(pos_w, 1.0))[:3]
                 heading_w = np.array([np.cos(yaw_w), np.sin(yaw_w), 0.0])  # shipped world yaw -> vector
                 corners = _box_corners_lidar(center_l, T_lw[:3, :3] @ heading_w, track["size_lwh"])
-                if yaw_source == "undefined":          # placeholder heading: flag grey, orientation is arbitrary
+                if track["full_id"] in crossing_now_ids:  # crossing-onset (t_c) frame: flag red
+                    col = np.array([1.0, 0.15, 0.15])
+                elif yaw_source == "undefined":          # placeholder heading: flag grey, orientation is arbitrary
                     col = np.array([0.6, 0.6, 0.6])
                 else:
                     col = colors[track["id"]] if observed else colors[track["id"]] * 0.45 + 0.4
@@ -302,8 +429,14 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
                 look_v = np.array([tgt[0], tgt[1], 0.5])
                 eye_v = np.array([tgt[0] - horiz[0] * follow_dist, tgt[1] - horiz[1] * follow_dist, follow_h])
 
+            corridor_ls = None
+            if ribbon is not None:                            # swept-path ribbon ahead of the ego at ts
+                s_ego = float(np.interp(ts, ribbon["ts"], ribbon["s"]))
+                corridor_ls = _ribbon_lineset(ribbon, s_ego, T_lw,
+                                              corridor_params.get("corridor_lookahead_m", 50.0),
+                                              corridor_params.get("corridor_min_forward_m", 0.0))
             right = _render_cloud_panel(renderer, mats, ss, rwidth, rheight,
-                                        pts_l, intensity, cmap, boxes3d, look_v, eye_v, up)
+                                        pts_l, intensity, cmap, boxes3d, look_v, eye_v, up, corridor_ls)
             left = cv2.resize(cam, (int(cw * rheight / ch), rheight))
             frame = np.hstack([left, right])
         else:  # camera
@@ -314,6 +447,8 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
         suffix = "tracked in 3D" if layout == "split" else "tracked"
         msg = f"seq {seq}   t={dt:+.1f}s   {len(active)} GOLD ped(s) {suffix}"
         cv2.putText(frame, msg, (16, int(38 * fs)), cv2.FONT_HERSHEY_SIMPLEX, fs, (20, 20, 20), max(1, int(2 * fs)), cv2.LINE_AA)
+        if action_list:
+            _draw_action_banner(frame, action_list, keyframe_ts, fs, bool(crossing_now_ids))
         if writer is None:
             h, w = frame.shape[:2]
             writer = FFmpegWriter(out_path, fps, (w, h))
@@ -353,6 +488,11 @@ def main() -> None:
     ap.add_argument("--conf", type=float, default=0.1, help="detector confidence threshold")
     ap.add_argument("--imgsz", type=int, default=2560, help="detector inference image size")
     ap.add_argument("--det-dir", type=Path, default=DEFAULT_DET_DIR, help="Step 0 2D-detection cache dir")
+    ap.add_argument("--actions-dir", type=Path, default=DEFAULT_ACTION_DIR, help="Step 2 action-record dir")
+    ap.add_argument("--show-action", action="store_true",
+                    help="overlay Step-2 action label(s) + ego corridor (auto-on with --ped)")
+    ap.add_argument("--no-action", action="store_true", help="disable the action-QC overlay entirely")
+    ap.add_argument("--corridor-z", type=float, default=0.0, help="ground height of the corridor strip (ego-frame m)")
     args = ap.parse_args()
 
     det_path = cache_path(args.det_dir, args.seq)
@@ -365,11 +505,14 @@ def main() -> None:
     tag = f"{args.seq}_{args.ped}" if args.ped else args.seq
     prefix = "zod" if args.layout == "split" else "cam"
     out = args.out or DEFAULT_REVIEW_DIR / f"{prefix}_{tag}.mp4"
+    # Action-QC overlay: on when the user isolates a pedestrian (--ped) or asks for it, off with --no-action.
+    actions_dir = None if args.no_action else (args.actions_dir if (args.ped or args.show_action) else None)
     n = render_video(args.seq, args.layout, args.traj_dir, out, args.window, args.fps, detector,
                      scale=args.scale, rwidth=args.rwidth, rheight=args.rheight, eye=args.eye,
                      look=args.look, up=args.up, point_size=args.point_size, cmap=args.cmap,
                      max_points=args.max_points, match_tol=args.match_tol, ped_filter=args.ped,
-                     follow_dist=args.follow_dist, follow_h=args.follow_height, supersample=args.supersample)
+                     follow_dist=args.follow_dist, follow_h=args.follow_height, supersample=args.supersample,
+                     actions_dir=actions_dir, corridor_z=args.corridor_z)
     print(f"wrote {n} frames → {out}")
 
 
