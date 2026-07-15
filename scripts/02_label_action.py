@@ -1,7 +1,9 @@
 """Step 2 — track-level ACTION labeling
 
-Reads every Step-1 GOLD trajectory (data/processed/trajectories/{seq}_{ped}.json) and writes one
-action record per track (data/processed/actions/{seq}_{ped}.json) with the crossing ACTION:
+Reads the Step-1 trajectories of the selected tier (`--tier {gold,silver,all}`; default gold until
+SILVER passes QC — GOLD and SILVER share the trajectories dir, so the population is an explicit
+choice, not whatever is on disk) and writes one action record per track
+(data/processed/actions/{seq}_{ped}.json) with the crossing ACTION:
 
   * crosses_ego_road (feet on the ego_road polygon, via the keyframe camera) + crossing_frame_timestamp
   * status = determined | undetermined  (EMPTY tracks → undetermined; kept + flagged, never forced)
@@ -14,6 +16,7 @@ see docs/PIPELINE.md and the geometry in src/zodped/labeling/actions.py.
 Usage:
     python scripts/02_label_action.py --max-seqs 2     # smoke test
     python scripts/02_label_action.py                  # full GOLD set
+    python scripts/02_label_action.py --tier all       # GOLD + SILVER (after SILVER QC)
 """
 
 from __future__ import annotations
@@ -26,14 +29,11 @@ from typing import Dict, List
 
 import numpy as np
 
+from _common import DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_tier_arg, tier_matches
 from zodped.dataset.keyframe import parse_zod_ts
 from zodped.labeling.actions import label_track_action, load_ego_road_polygons
 from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration
-
-ROOT = Path(__file__).resolve().parents[1]
-SEQ_DIR = ROOT / "data" / "raw" / "sequences"
-DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
 DEFAULT_OUT_DIR = ROOT / "data" / "processed" / "actions"
 DEFAULT_REPORT_PATH = ROOT / "data" / "processed" / "reports" / "actions_run_report.json"
 
@@ -42,7 +42,7 @@ def _group_by_sequence(traj_dir: Path) -> Dict[str, List[Path]]:
     """Map seq_id -> sorted trajectory JSON paths (filename is {seq}_{ped}.json)."""
     groups: Dict[str, List[Path]] = defaultdict(list)
     for path in sorted(traj_dir.glob("*.json")):
-        if path.name.startswith("_"):           # skip _step2_report.json and friends
+        if path.name.startswith("_"):           # defensive: non-track files don't belong here
             continue
         groups[path.name.split("_", 1)[0]].append(path)
     return groups
@@ -63,6 +63,8 @@ def process_sequence(seq_id: str, traj_paths: List[Path], args: argparse.Namespa
     records: List[dict] = []
     for path in traj_paths:
         trajectory = json.loads(path.read_text())
+        if not tier_matches(trajectory, args.tier):
+            continue
         record = label_track_action(trajectory, calib, polygons, T_world_lidar_kf)
         (args.out_dir / path.name).write_text(json.dumps(record))
         records.append(record)
@@ -87,6 +89,7 @@ def main() -> None:
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR, help="Step 1 trajectory JSONs")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="per-track action JSONs")
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="run report (out of the data dir)")
+    add_tier_arg(ap, default="gold")
     ap.add_argument("--max-seqs", type=int, default=None, help="cap sequences (smoke test)")
     args = ap.parse_args()
 
@@ -96,8 +99,8 @@ def main() -> None:
         seq_ids = seq_ids[: args.max_seqs]
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Step 2 (action labeling): {sum(len(groups[s]) for s in seq_ids)} tracks over "
-          f"{len(seq_ids)} sequences → {args.out_dir}")
+    print(f"Step 2 (action labeling): {sum(len(groups[s]) for s in seq_ids)} candidate tracks over "
+          f"{len(seq_ids)} sequences (tier: {args.tier}) → {args.out_dir}")
 
     all_records: List[dict] = []
     failures: List[dict] = []
@@ -111,6 +114,7 @@ def main() -> None:
 
     summary = _summarise(all_records)
     report = {
+        "tier": args.tier,
         "n_sequences": len(seq_ids),
         "summary": summary,
         "failures": failures,

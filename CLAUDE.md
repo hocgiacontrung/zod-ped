@@ -31,7 +31,7 @@ unlike existing pedestrian intent datasets (JAAD, PIE, PSI) which are camera-onl
 Full set — frame conventions, structured-array `.npy`, per-point µs timestamp offset, 2D-only guard, 55ms scan-gap limit → `docs/DATA_FORMAT.md`.
 
 ## Trajectory Approach (pivot 2026-06-18)
-Measurement pivoted from off-the-shelf 3D detectors (**rejected** — severe ZOD domain gap, recall 0.11–0.49) to **2D detector → frustum lift to 3D** (recall 0.585, ~15cm median, zero training), fed into a reused **KF/RTS linker** (CV-Kalman associate + coast, RTS smooth; compensate-before-associate). Unit = pedestrian (tracked once over the full clip), not window. Two tiers: GOLD (keyframe-anchored, verified) / SILVER (detector-found, flagged `is_in_gold_standard=false`).
+Measurement pivoted from off-the-shelf 3D detectors (**rejected** — severe ZOD domain gap) to **2D detector → frustum lift to 3D** (recall 0.585, ~15cm median, zero training), fed into **KF/RTS linker** (CV-Kalman associate + coast, RTS smooth; compensate-before-associate). Unit = pedestrian (tracked once over the full clip). Two tiers: GOLD (keyframe-anchored, verified) / SILVER (detector-found, flagged `is_in_gold_standard=false`).
 Output: per-ped `data/processed/trajectories/{seq_id}_{pedestrian_id}.json` (world frame); `position_ego_rel` is per-window, added in Step 3 (sample assembly).
 → Architecture, open options (SAM4D / fine-tune), dataset decision, evidence: `docs/PIPELINE.md` "Direction & open options" + `docs/EXPERIMENTS_LOG.md`.
 
@@ -62,6 +62,7 @@ zod-ped/
 │   ├── labeling/                ← detector.py (make_detector), detection_cache.py, frustum.py, tracker.py, boxes.py
 │   └── utils/                   ← projection.py (Kannala fisheye projection), ego_motion.py
 ├── scripts/                     ← runnable entry-points (thin: argparse + I/O + calls into zodped)
+│   ├── _common.py                ← shared CLI plumbing: paths, frustum-pool arg group (keeps 1a/1b in sync), --tier filter
 │   ├── prune_lidar.py            ← delete lidar_velodyne/ for non-pedestrian seqs (run per batch)
 │   ├── 00_detect.py                  ← Step 0: cache 2D detections once (run before Step 1)
 │   ├── qc_trajectories.py            ← Step 1 QC: score tracks + rank manual-review queue

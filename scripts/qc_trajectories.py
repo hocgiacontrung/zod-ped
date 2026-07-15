@@ -1,4 +1,8 @@
-"""Step 1 QC — score every GOLD trajectory and rank a manual-review queue.
+"""Step 1 QC — score trajectories (per tier) and rank a manual-review queue.
+
+GOLD and SILVER tracks share the trajectories dir, so the population is chosen EXPLICITLY with
+`--tier {gold,silver,all}` (default gold — the historical baseline numbers). SILVER QC is
+`--tier silver`.
 
 Turns the qualitative "watch the demo video" pass into a scalable, quantitative gate. Reads the
 per-pedestrian trajectory JSONs (data/processed/trajectories/) plus the Step 1 run report (for each
@@ -28,7 +32,8 @@ True per-coast attribution (detector-miss vs gate-reject) needs the candidate po
 (re-run the detector); drill into a specific bad track with scripts/viz_render_video.py.
 
 Usage:
-    python scripts/qc_trajectories.py                       # score all tracks, print queue + summary
+    python scripts/qc_trajectories.py                       # score GOLD, print queue + summary
+    python scripts/qc_trajectories.py --tier silver         # SILVER QC pass
     python scripts/qc_trajectories.py --seq 000007          # one sequence
     python scripts/qc_trajectories.py --top 40 --csv data/processed/review/qc.csv
     python scripts/qc_trajectories.py --min-span 0.6 --min-observed 0.5 --max-speed 3.5
@@ -45,10 +50,9 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from _common import DEFAULT_TRAJ_DIR, ROOT, add_tier_arg, tier_matches, tier_of
 from zodped.dataset.keyframe import parse_zod_ts
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
 DEFAULT_REPORT_PATH = ROOT / "data" / "processed" / "reports" / "trajectories_run_report.json"
 DEFAULT_QUALITY_REPORT = ROOT / "data" / "processed" / "reports" / "trajectory_quality_report.json"
 
@@ -104,6 +108,7 @@ def score_track(doc: dict, n_pool_frames: Optional[int]) -> dict:
     return {
         "seq": doc["sequence_id"],
         "ped": doc["pedestrian_id"][:8],
+        "tier": tier_of(doc),
         "occlusion": doc.get("anchor", {}).get("occlusion", "?"),
         "n_frames": n_frames,
         "duration_s": round(float(ts[-1] - ts[0]), 2) if n_frames >= 2 else 0.0,
@@ -264,6 +269,7 @@ def main() -> None:
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR)
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="Step 1 run report (for span_fraction)")
     ap.add_argument("--seq", default=None, help="restrict to one sequence id, e.g. 000007")
+    add_tier_arg(ap, default="gold")
     ap.add_argument("--top", type=int, default=30, help="how many worst tracks to print")
     ap.add_argument("--csv", type=Path, default=None, help="optional path to write the full per-track table")
     ap.add_argument("--min-duration", type=float, default=3.0, help="flag SHORT below this tracked duration (s)")
@@ -285,14 +291,19 @@ def main() -> None:
     rows: List[dict] = []
     for f in files:
         doc = json.loads(f.read_text())
+        if not tier_matches(doc, args.tier):
+            continue
         m = score_track(doc, pool_frames.get(doc["sequence_id"]))
         m["flags"] = flag_track(m, args)
         m["quality_tier"] = quality_tier(m["flags"])
         rows.append(m)
+    if not rows:
+        raise SystemExit(f"No {args.tier} trajectories matching {pattern} in {args.traj_dir}")
+    print(f"scoring {len(rows)} tracks (tier: {args.tier})")
 
     if args.csv:
         args.csv.parent.mkdir(parents=True, exist_ok=True)
-        cols = ["seq", "ped", "occlusion", "quality_tier", "n_frames", "duration_s", "span_frac",
+        cols = ["seq", "ped", "tier", "occlusion", "quality_tier", "n_frames", "duration_s", "span_frac",
                 "observed_frac", "real_frac", "n_real", "longest_coast", "n_coast_runs",
                 "median_lidar_pts", "median_conf", "max_speed", "flags"]
         with args.csv.open("w", newline="") as fh:
@@ -312,6 +323,7 @@ def main() -> None:
     if args.report_out:
         tier_counts = {t: sum(r["quality_tier"] == t for r in rows) for t in ("good", "marginal", "bad")}
         report = {
+            "tier": args.tier,
             "thresholds": {
                 "min_duration_s": args.min_duration, "min_observed": args.min_observed,
                 "min_lidar_pts": args.min_lidar_pts, "min_conf": args.min_conf, "max_speed": args.max_speed,

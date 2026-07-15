@@ -26,7 +26,6 @@ well inside the frustum's ~0.15 m localization budget.
 
 Output: data/processed/trajectories/{seq_id}_{pedestrian_id}.json — each frame carries the tracked
 position and the shipped 3D `box` (centre/size/yaw).
-Note: position_ego_rel is per-window and is added at sample assembly, NOT here.
 
 Usage:
     python scripts/00_detect.py                                  # cache YOLO boxes ONCE (~3-4 h)
@@ -43,9 +42,8 @@ from typing import List
 
 import numpy as np
 
-from zodped.dataset.keyframe import (
-    MAX_LIDAR_GAP_S, GtBox, load_keyframe_pedestrians, parse_zod_ts,
-)
+from _common import ROOT, SEQ_DIR, add_pool_args, load_seq_ids, pool_config, pool_kwargs
+from zodped.dataset.keyframe import GtBox, load_keyframe_pedestrians, parse_zod_ts
 from zodped.labeling.boxes import assemble_track_boxes
 from zodped.labeling.detection_cache import cache_path, cached_detector, decode_detections, read_doc
 from zodped.labeling.detector import make_detector
@@ -54,11 +52,7 @@ from zodped.labeling.tracker import track_pedestrian_from_detections
 from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration
 
-ROOT = Path(__file__).resolve().parents[1]
-SEQ_DIR = ROOT / "data" / "raw" / "sequences"
-PED_SEQUENCES = ROOT / "data" / "pedestrian_sequences.json"
 DEFAULT_OUT_DIR = ROOT / "data" / "processed" / "trajectories"          # per-ped track data only
-DEFAULT_DET_DIR = ROOT / "data" / "processed" / "detections"           # Step 0 2D-box cache
 DEFAULT_REPORT_PATH = ROOT / "data" / "processed" / "reports" / "trajectories_run_report.json"
 
 
@@ -143,11 +137,7 @@ def process_sequence(seq_id: str, live_detector: LazyDetector, args: argparse.Na
         return {"seq_id": seq_id, "n_peds": 0, "n_written": 0, "n_pool_frames": 0}
 
     detector = resolve_detector(seq_id, live_detector, args)
-    pool = build_candidate_pool(
-        seq_dir, detector, em, lidar_ext, calib,
-        camera=args.camera, max_gap=args.max_gap, box_shrink=args.box_shrink,
-        slab=args.slab, min_pts=args.min_pts,
-    )
+    pool = build_candidate_pool(seq_dir, detector, em, lidar_ext, calib, **pool_kwargs(args))
     if not pool:
         return {"seq_id": seq_id, "n_peds": len(gold), "n_written": 0, "n_pool_frames": 0,
                 "error": "empty candidate pool (no paired image/LiDAR frames)"}
@@ -175,35 +165,18 @@ def process_sequence(seq_id: str, live_detector: LazyDetector, args: argparse.Na
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="yolo11x.pt", help="2D detector weights (yolo*/rtdetr*)")
-    ap.add_argument("--conf", type=float, default=0.1, help="detector confidence threshold")
     ap.add_argument("--imgsz", type=int, default=2560, help="detector inference image size")
-    ap.add_argument("--camera", default="camera_front_blur")
-    ap.add_argument("--max-gap", type=float, default=MAX_LIDAR_GAP_S, help="max image↔scan gap (s)")
-    ap.add_argument("--box-shrink", type=float, default=0.6, help="kept central width fraction of each 2D box")
-    ap.add_argument("--slab", type=float, default=1.5, help="nearest-depth slab thickness (m)")
-    ap.add_argument("--min-pts", type=int, default=3, help="min in-frustum LiDAR points to lift a box")
-    ap.add_argument("--gate-mahal2", type=float, default=9.0, help="squared-Mahalanobis association gate")
-    ap.add_argument("--max-misses", type=int, default=5, help="consecutive coasted frames before a pass ends")
-    ap.add_argument("--meas-sigma", type=float, default=0.3, help="frustum measurement noise std (m)")
-    ap.add_argument("--min-speed", type=float, default=0.3, help="speed below which box yaw is filled, not from velocity (m/s)")
-    ap.add_argument("--det-dir", type=Path, default=DEFAULT_DET_DIR, help="Step 0 2D-detection cache dir")
+    add_pool_args(ap)                              # pool/linker params shared verbatim with Step 1b
     ap.add_argument("--max-seqs", type=int, default=None, help="cap sequences (smoke test)")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="per-ped trajectory JSONs (data only)")
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="run report (kept out of the data dir)")
     args = ap.parse_args()
 
     live_detector = LazyDetector(args)
-
-    seq_ids = [e["seq_id"] for e in json.loads(PED_SEQUENCES.read_text())]
-    if args.max_seqs:
-        seq_ids = seq_ids[: args.max_seqs]
+    seq_ids = load_seq_ids(args.max_seqs)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    config = {"detector": "frustum(2d+lidar)", "model": args.model, "conf": args.conf,
-              "imgsz": args.imgsz, "box_shrink": args.box_shrink, "slab_m": args.slab,
-              "min_pts": args.min_pts, "gate_mahal2": args.gate_mahal2,
-              "max_consecutive_misses": args.max_misses, "meas_sigma": args.meas_sigma,
-              "max_gap_s": args.max_gap, "min_speed": args.min_speed}
+    config = {**pool_config(args), "model": args.model, "imgsz": args.imgsz}
     print(f"Step 1 (GOLD): tracking pedestrians over {len(seq_ids)} sequences → {args.out_dir}")
 
     summaries: List[dict] = []

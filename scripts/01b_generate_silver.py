@@ -32,7 +32,10 @@ from typing import Dict, List
 
 import numpy as np
 
-from zodped.dataset.keyframe import MAX_LIDAR_GAP_S, parse_zod_ts
+from _common import (
+    DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_pool_args, load_seq_ids, pool_config, pool_kwargs,
+)
+from zodped.dataset.keyframe import parse_zod_ts
 from zodped.labeling.boxes import assemble_track_boxes
 from zodped.labeling.detection_cache import cache_path, cached_detector, load_detections
 from zodped.labeling.frustum import FrameCandidates, build_candidate_pool
@@ -40,11 +43,6 @@ from zodped.labeling.tracker import birth_tracks_from_residual_pool
 from zodped.utils.ego_motion import load_ego_motion
 from zodped.utils.projection import load_calibration
 
-ROOT = Path(__file__).resolve().parents[1]
-SEQ_DIR = ROOT / "data" / "raw" / "sequences"
-PED_SEQUENCES = ROOT / "data" / "pedestrian_sequences.json"
-DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"   # SILVER lands beside GOLD
-DEFAULT_DET_DIR = ROOT / "data" / "processed" / "detections"
 DEFAULT_REPORT_PATH = ROOT / "data" / "processed" / "reports" / "silver_run_report.json"
 
 
@@ -118,11 +116,7 @@ def process_sequence(seq_id: str, args: argparse.Namespace, config: dict) -> dic
     keyframe_iso = json.loads((seq_dir / "info.json").read_text())["keyframe_time"]
 
     detector = cached_detector(load_detections(det_path, min_conf=args.conf))
-    pool = build_candidate_pool(
-        seq_dir, detector, em, lidar_ext, calib,
-        camera=args.camera, max_gap=args.max_gap, box_shrink=args.box_shrink,
-        slab=args.slab, min_pts=args.min_pts,
-    )
+    pool = build_candidate_pool(seq_dir, detector, em, lidar_ext, calib, **pool_kwargs(args))
     if not pool:
         return {"seq_id": seq_id, "n_silver": 0, "n_pool_frames": 0}
 
@@ -149,18 +143,8 @@ def process_sequence(seq_id: str, args: argparse.Namespace, config: dict) -> dic
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR, help="GOLD in / SILVER out (same dir)")
-    ap.add_argument("--det-dir", type=Path, default=DEFAULT_DET_DIR, help="Step 0 2D-detection cache dir")
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH)
-    ap.add_argument("--camera", default="camera_front_blur")
-    ap.add_argument("--conf", type=float, default=0.1, help="detection confidence floor (matches Step 0/1)")
-    ap.add_argument("--max-gap", type=float, default=MAX_LIDAR_GAP_S, help="max image↔scan gap (s)")
-    ap.add_argument("--box-shrink", type=float, default=0.6, help="kept central width fraction of each 2D box")
-    ap.add_argument("--slab", type=float, default=1.5, help="nearest-depth slab thickness (m)")
-    ap.add_argument("--min-pts", type=int, default=3, help="min in-frustum LiDAR points to lift a box")
-    ap.add_argument("--gate-mahal2", type=float, default=9.0, help="squared-Mahalanobis association gate")
-    ap.add_argument("--max-misses", type=int, default=5, help="consecutive coasted frames before a track ends")
-    ap.add_argument("--meas-sigma", type=float, default=0.3, help="frustum measurement noise std (m)")
-    ap.add_argument("--min-speed", type=float, default=0.3, help="speed below which box yaw is filled (m/s)")
+    add_pool_args(ap)                              # pool/linker params shared verbatim with Step 1a
     ap.add_argument("--claim-radius", type=float, default=1.5, help="GOLD claims candidates within this radius (m)")
     ap.add_argument("--min-support", type=int, default=4, help="min real observations to confirm a SILVER track")
     ap.add_argument("--min-duration", type=float, default=1.0, help="min real-observation span to confirm (s)")
@@ -170,16 +154,11 @@ def main() -> None:
     args = ap.parse_args()
 
     args.traj_dir.mkdir(parents=True, exist_ok=True)
-    seq_ids = [e["seq_id"] for e in json.loads(PED_SEQUENCES.read_text())]
-    if args.max_seqs:
-        seq_ids = seq_ids[: args.max_seqs]
+    seq_ids = load_seq_ids(args.max_seqs)
 
-    config = {"tier": "silver", "detector": "frustum(2d+lidar)", "conf": args.conf,
-              "box_shrink": args.box_shrink, "slab_m": args.slab, "min_pts": args.min_pts,
-              "gate_mahal2": args.gate_mahal2, "max_consecutive_misses": args.max_misses,
-              "meas_sigma": args.meas_sigma, "claim_radius_m": args.claim_radius,
-              "min_support": args.min_support, "min_duration_s": args.min_duration,
-              "prior_size_lwh": list(args.prior_size), "min_speed": args.min_speed}
+    config = {**pool_config(args), "tier": "silver",
+              "claim_radius_m": args.claim_radius, "min_support": args.min_support,
+              "min_duration_s": args.min_duration, "prior_size_lwh": list(args.prior_size)}
     print(f"Step 1b (SILVER): birthing detector tracks over {len(seq_ids)} sequences → {args.traj_dir}")
 
     summaries: List[dict] = []

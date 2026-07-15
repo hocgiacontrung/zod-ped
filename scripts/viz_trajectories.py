@@ -9,6 +9,7 @@ review viewer.
 
 Usage:
     python scripts/viz_trajectories.py --traj-dir data/processed/trajectories_verify
+    python scripts/viz_trajectories.py --seq 000007 --tier silver
 """
 
 from __future__ import annotations
@@ -20,12 +21,10 @@ from pathlib import Path
 
 import numpy as np
 
+from _common import DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_tier_arg, tier_matches
 from zodped.dataset.keyframe import parse_zod_ts
 from zodped.utils.ego_motion import interpolate_pose, load_ego_motion
 
-ROOT = Path(__file__).resolve().parents[1]
-SEQ_DIR = ROOT / "data" / "raw" / "sequences"
-DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
 DEFAULT_REVIEW_DIR = ROOT / "data" / "processed" / "review"
 
 
@@ -43,14 +42,17 @@ def _ped_stats(doc: dict, ego_kf_xy: np.ndarray) -> dict:
     obs_mask = np.array([f["in_observation"] for f in frames])
     obs = pos[obs_mask]
     steps = np.linalg.norm(np.diff(obs, axis=0), axis=1) if len(obs) > 1 else np.zeros(0)
-    anchor_xy = np.array(doc["anchor"]["position_world"][:2])
+    # SILVER (detector-born) tracks carry no anchor position — no star, range from the first frame.
+    anchor_pos = doc.get("anchor", {}).get("position_world")
+    anchor_xy = np.array(anchor_pos[:2]) if anchor_pos is not None else None
+    ref_xy = anchor_xy if anchor_xy is not None else pos[0, :2]
     return {
         "ped": doc["pedestrian_id"][:8],
         "n": len(frames),
         "obs_frac": doc["stats"]["observed_fraction"],
         "path_len": round(float(steps.sum()), 1),
         "max_step": round(float(steps.max()), 2) if steps.size else 0.0,
-        "range_kf": round(float(np.linalg.norm(anchor_xy - ego_kf_xy)), 1),
+        "range_kf": round(float(np.linalg.norm(ref_xy - ego_kf_xy)), 1),
         "pos": pos, "obs_mask": obs_mask, "anchor_xy": anchor_xy,
     }
 
@@ -60,6 +62,7 @@ def main() -> None:
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR, help="per-ped trajectory JSONs")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_REVIEW_DIR, help="where BEV review PNGs are written")
     ap.add_argument("--seq", default=None, help="render only this sequence id (default: all)")
+    add_tier_arg(ap, default="gold")
     ap.add_argument("--jump-warn", type=float, default=1.5, help="max_step (m) above which a track is flagged")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -70,12 +73,16 @@ def main() -> None:
 
     pattern = f"{args.seq}_*.json" if args.seq else "*.json"
     files = sorted(f for f in args.traj_dir.glob(pattern) if not f.name.startswith("_"))
-    if not files:
-        raise SystemExit(f"No trajectories matching {pattern!r} in {args.traj_dir}")
     by_seq = defaultdict(list)
+    n_files = 0
     for f in files:
         d = json.loads(f.read_text())
+        if not tier_matches(d, args.tier):
+            continue
         by_seq[d["sequence_id"]].append(d)
+        n_files += 1
+    if not by_seq:
+        raise SystemExit(f"No {args.tier} trajectories matching {pattern!r} in {args.traj_dir}")
 
     print(f"{'seq':>7} {'ped':>9} {'n':>4} {'obs%':>6} {'path_m':>7} {'maxstep':>8} {'range_kf':>9}  flag")
     print("-" * 72)
@@ -100,17 +107,18 @@ def main() -> None:
             ax.plot(pos[om, 0], pos[om, 1], "-", color=c, lw=1.5, ms=3, marker="o")
             if (~om).any():
                 ax.scatter(pos[~om, 0], pos[~om, 1], color=c, s=8, alpha=0.3)
-            ax.scatter(*s["anchor_xy"], color=c, marker="*", s=120, edgecolor="k", zorder=6)
+            if s["anchor_xy"] is not None:
+                ax.scatter(*s["anchor_xy"], color=c, marker="*", s=120, edgecolor="k", zorder=6)
 
         ax.set_aspect("equal"); ax.grid(alpha=0.3)
         ax.set_xlabel("world x (m)"); ax.set_ylabel("world y (m)")
-        ax.set_title(f"seq {seq_id} — {len(docs)} GOLD peds (★=keyframe anchor, faded=coasted)")
+        ax.set_title(f"seq {seq_id} — {len(docs)} {args.tier} peds (★=keyframe anchor, faded=coasted)")
         ax.legend(loc="best", fontsize=8)
         out = args.out_dir / f"bev_{seq_id}.png"
         fig.savefig(out, dpi=110, bbox_inches="tight"); plt.close(fig)
 
     print("-" * 72)
-    print(f"{len(files)} trajectories, {len(by_seq)} sequences. "
+    print(f"{n_files} {args.tier} trajectories, {len(by_seq)} sequences. "
           f"{n_flag} flagged (max_step > {args.jump_warn} m). BEV plots → {args.out_dir}/bev_*.png")
 
 

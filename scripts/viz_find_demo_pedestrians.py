@@ -23,12 +23,11 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import List, Optional
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
+from _common import DEFAULT_TRAJ_DIR, add_tier_arg, tier_matches
+from zodped.dataset.keyframe import parse_zod_ts
 
 
 def _longest_bridged_gap(obs: np.ndarray, ts: np.ndarray) -> tuple:
@@ -54,7 +53,7 @@ def _summarize(doc: dict) -> dict:
     frames = doc["frames"]
     obs = np.array([f["in_observation"] for f in frames])
     pos = np.array([f["position_world"] for f in frames])
-    ts = np.array([_parse(f["timestamp"]) for f in frames])
+    ts = np.array([parse_zod_ts(f["timestamp"]) for f in frames])
 
     observed = pos[obs]
     steps = np.linalg.norm(np.diff(observed, axis=0), axis=1) if len(observed) > 1 else np.zeros(0)
@@ -71,14 +70,10 @@ def _summarize(doc: dict) -> dict:
     }
 
 
-def _parse(iso: str) -> float:
-    import datetime
-    return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR)
+    add_tier_arg(ap, default="gold")
     ap.add_argument("--top", type=int, default=20, help="how many candidates to print")
     ap.add_argument("--min-gap", type=int, default=2, help="min bridged-coast run (frames)")
     ap.add_argument("--min-obs", type=float, default=0.6, help="min observed_fraction")
@@ -86,8 +81,8 @@ def main() -> None:
     ap.add_argument("--max-step", type=float, default=1.5, help="max observed inter-frame step (m)")
     args = ap.parse_args()
 
-    files = sorted(f for f in args.traj_dir.glob("*.json"))
-    rows = [_summarize(json.loads(f.read_text())) for f in files]
+    docs = (json.loads(f.read_text()) for f in sorted(args.traj_dir.glob("*.json")))
+    rows = [_summarize(d) for d in docs if tier_matches(d, args.tier)]
 
     cands = [r for r in rows
              if r["gap_frames"] >= args.min_gap and r["obs_frac"] >= args.min_obs

@@ -98,15 +98,15 @@ The measurement source changed here. The original plan localized pedestrians wit
 **Rejected:** off-the-shelf PointPillars / OpenPCDet as 3D measurement (`docs/EXPERIMENTS_LOG.md`; recoverable at git tag `experiments/3d-detectors`).
 
 ## Bring-up gates (DONE — drove the 2026-06-18 pivot)
-Two experiments run before building the MOT (full numbers in `docs/EXPERIMENTS_LOG.md`):
-1. **World-frame transform validation — PASSED.** A known-static object (`TrafficGuide`/`SnowMarker` pole) with `location_3d`, tracked through the compensate-first chain stayed **pinned** in world coordinates (seq 000007: world-frame std 0.027 m vs 0.959 m uncompensated). Validates pose interpolation + extrinsics for every design; no detector needed.
+Two experiments run before building the MOT (full in `docs/EXPERIMENTS_LOG.md`):
+1. **World-frame transform validation — PASSED.** A known-static object (`TrafficGuide`/`SnowMarker` pole) with `location_3d`, tracked through the compensate-first chain stayed **pinned** in world coordinates. Validates pose interpolation + extrinsics for every design.
 2. **Detector recall on the keyframe boxes — DONE -> NO-GO for off-the-shelf 3D.** 
 Off-the-shelf PointPillars recovered only 0.11 (KITTI)/0.49 (nuScenes) of the boxes and collapsed at range; the **frustum** (2D→3D) reached 0.585 with no training. → dropped off-the-shelf 3D detectors, adopted the 2D→frustum measurement ("Direction & open options"). Remaining open lever: fine-tune, or bring in a modern 3D detector (SAM4D).
 
 ## Two-tier labels — keyframe coverage
 ZOD annotates one keyframe per 20s clip, so a pedestrian present only before/after it carries no ZOD annotation. We DO admit such pedestrians, in a separate quality tier so the verified set stays clean:
 - **GOLD** — keyframe-anchored peds: verified ZOD identity + 3D box.
-- **SILVER** — detector-found peds: no human verification; flagged `label_confidence_tier=low`, `is_in_gold_standard=false`.
+- **SILVER** — detector-found peds: no human verification; flagged `label_confidence_tier=medium`, `is_in_gold_standard=false` (`low` is reserved for a possible future demoted tier).
 
 ## Schema, parameters & filters
 

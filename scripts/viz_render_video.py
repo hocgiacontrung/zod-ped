@@ -18,13 +18,13 @@ Two layouts (`--layout`):
 
 Both layouts share the camera-panel drawing; identity is a consistent per-pedestrian colour, coasted
 frames draw a hollow marker labelled "coast", and detector boxes no pedestrian claimed are faint grey.
-Only GOLD tier (keyframe-anchored pedestrians) is drawn; SILVER (detector-found) is not built yet.
+GOLD and SILVER share the trajectories dir; ``--tier {gold,silver,all}`` picks what is drawn
+(default gold — the verified demo look).
 
 Action-QC overlay (Step 2): with ``--ped`` (or ``--show-action``) the Step-2 action record is read and
 the render is annotated so the crossing label can be eyeballed — a per-track banner (CROSSES ROAD + t_c
 / no road cross / undetermined) and a red flash on the box and frame at the crossing-onset (t_c) frame.
-The crossing action is now feet-on-ego-road; the ego swept-path CORRIDOR ribbon is benched (dormant
-draw path, only shown if a record still carries corridor ``params``). ``--no-action`` disables it.
+``--no-action`` disables it.
 
 Usage:
     python scripts/viz_render_video.py --seq 000007
@@ -44,6 +44,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from _common import DEFAULT_DET_DIR, DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_tier_arg, tier_matches
 from zodped.dataset.keyframe import lidar_ts_from_filename, load_xyzi, parse_zod_ts
 from zodped.labeling.detection_cache import cache_path, cached_detector, load_detections
 from zodped.labeling.detector import make_detector
@@ -51,11 +52,7 @@ from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration, project_lidar_to_image
 from zodped.utils.video import FFmpegWriter
 
-ROOT = Path(__file__).resolve().parents[1]
-SEQ_DIR = ROOT / "data" / "raw" / "sequences"
-DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
 DEFAULT_REVIEW_DIR = ROOT / "data" / "processed" / "review"
-DEFAULT_DET_DIR = ROOT / "data" / "processed" / "detections"          # Step 0 2D-box cache
 DEFAULT_ACTION_DIR = ROOT / "data" / "processed" / "actions"          # Step 2 per-track action record
 
 # Distinct per-pedestrian box colours (RGB 0-1), chosen to contrast with the reddish point cloud.
@@ -66,8 +63,8 @@ _PALETTE = [
 ]
 
 
-def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str]) -> List[dict]:
-    """Load GOLD tracks for one sequence as the per-frame SHIPPED 3D box (centre/yaw/size) + obs flag.
+def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str], tier: str) -> List[dict]:
+    """Load one sequence's tracks (of the chosen tier) as the per-frame SHIPPED 3D box + obs flag.
 
     Reads the box Step 1 wrote (zodped.labeling.boxes) verbatim, so the render shows the exact
     artifact in the dataset rather than a recomputed look-alike. `size_lwh` is rigid per pedestrian,
@@ -80,6 +77,8 @@ def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str]) -> List
         doc = json.loads(f.read_text())
         pid = doc["pedestrian_id"]
         if ped_filter and not pid.startswith(ped_filter):
+            continue
+        if not tier_matches(doc, tier):
             continue
         frames = doc["frames"]
         tracks.append({
@@ -135,47 +134,6 @@ def _draw_action_banner(img: np.ndarray, actions: List[dict], keyframe_ts: float
         cv2.rectangle(img, (0, 0), (w - 1, h - 1), (40, 40, 220), max(4, int(8 * fs)))
         cv2.putText(img, "CROSSING (t_c)", (16, y + int(6 * fs)), font, fs, (40, 40, 220),
                     max(2, int(3 * fs)), cv2.LINE_AA)
-
-
-def _swept_path_ribbon_world(em: dict, half_width_m: float, z_offset: float) -> dict:
-    """Ego swept-path ribbon in the WORLD frame: left/right rails (3D), arc-length, timestamps.
-
-    The rails are the ego trajectory offset ±half_width perpendicular to its heading, at the ego's own
-    height (so the ribbon lies on the road) + z_offset. Curves WITH the ego through turns — this is the
-    exact geometry actions.py labels against, so watching a box enter the ribbon justifies the label.
-    """
-    poses = np.asarray(em["poses"])
-    xy, z = poses[:, :2, 3], poses[:, 2, 3] + z_offset
-    ts = np.asarray(em["timestamps"])
-    seg = np.linalg.norm(np.diff(xy, axis=0), axis=1)
-    s = np.concatenate([[0.0], np.cumsum(seg)])
-    tang = np.gradient(xy, axis=0)
-    tang /= (np.linalg.norm(tang, axis=1, keepdims=True) + 1e-9)
-    nrm = np.column_stack([-tang[:, 1], tang[:, 0]])          # left normal to travel
-    left = np.column_stack([xy + half_width_m * nrm, z])
-    right = np.column_stack([xy - half_width_m * nrm, z])
-    return {"left": left, "right": right, "s": s, "ts": ts}
-
-
-def _ribbon_lineset(ribbon: dict, s_ego: float, T_lw: np.ndarray,
-                    lookahead_m: float, min_forward_m: float) -> Optional["object"]:
-    """Open3D LineSet for the swept-path ribbon AHEAD of the ego (arc-length window), in the LiDAR frame."""
-    import open3d as o3d
-    s = ribbon["s"]
-    mask = (s >= s_ego + min_forward_m) & (s <= s_ego + lookahead_m)
-    if int(mask.sum()) < 2:
-        return None
-    left, right = ribbon["left"][mask], ribbon["right"][mask]
-    world = np.vstack([left, right])
-    lidar = (T_lw @ np.c_[world, np.ones(len(world))].T).T[:, :3]
-    m = len(left)
-    lines = [e for i in range(m - 1) for e in ((i, i + 1), (m + i, m + i + 1))]   # the two rails
-    lines += [(i, m + i) for i in range(0, m, max(1, m // 6))]                    # cross ties (depth)
-    ls = o3d.geometry.LineSet()
-    ls.points = o3d.utility.Vector3dVector(lidar)
-    ls.lines = o3d.utility.Vector2iVector(np.array(lines))
-    ls.colors = o3d.utility.Vector3dVector(np.tile([1.0, 0.55, 0.0], (len(lines), 1)))  # orange
-    return ls
 
 
 def _state_at(track: dict, ts: float, tol: float) -> Optional[Tuple[np.ndarray, float, str, bool]]:
@@ -276,7 +234,7 @@ def _draw_camera_panel(img: np.ndarray, boxes, active: List[tuple], T_lw: np.nda
 
 def _render_cloud_panel(renderer, mats: dict, ss: int, rwidth: int, rheight: int,
                         pts_l: np.ndarray, intensity: np.ndarray, cmap: str,
-                        boxes3d: List[tuple], look_v, eye_v, up, corridor=None) -> np.ndarray:
+                        boxes3d: List[tuple], look_v, eye_v, up) -> np.ndarray:
     """Render the 3D point-cloud panel (cloud + oriented boxes) to a BGR (rheight, rwidth) image."""
     import open3d as o3d
     renderer.scene.clear_geometry()
@@ -284,8 +242,6 @@ def _render_cloud_panel(renderer, mats: dict, ss: int, rwidth: int, rheight: int
     pcd.points = o3d.utility.Vector3dVector(pts_l)
     pcd.colors = o3d.utility.Vector3dVector(_point_colors(intensity, cmap))
     renderer.scene.add_geometry("cloud", pcd, mats["pcd"])
-    if corridor is not None:                                     # ego swept-path strip (action-QC)
-        renderer.scene.add_geometry("corridor", corridor, mats["corridor"])
     for bid, corners, col, observed in boxes3d:
         renderer.scene.add_geometry(f"box_{bid}", _lineset(corners, col),
                                     mats["line"] if observed else mats["coast"])
@@ -299,8 +255,8 @@ def _render_cloud_panel(renderer, mats: dict, ss: int, rwidth: int, rheight: int
 def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s: float, fps: int,
                  detector, *, scale: float, rwidth: int, rheight: int, eye, look, up,
                  point_size: float, cmap: str, max_points: int, match_tol: float,
-                 ped_filter: Optional[str], follow_dist: float, follow_h: float,
-                 supersample: int, actions_dir: Optional[Path], corridor_z: float) -> int:
+                 ped_filter: Optional[str], tier: str, follow_dist: float, follow_h: float,
+                 supersample: int, actions_dir: Optional[Path]) -> int:
     """Render the demo MP4 for one sequence in the chosen layout. Returns frames written."""
     seq_dir = SEQ_DIR / seq
     em = load_ego_motion(seq_dir / "ego_motion.json")
@@ -308,17 +264,14 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
     lidar_ext = np.array(calib["FC"]["lidar_extrinsics"])
     keyframe_ts = parse_zod_ts(json.loads((seq_dir / "info.json").read_text())["keyframe_time"])
 
-    tracks = load_ped_tracks(traj_dir, seq, ped_filter)
+    tracks = load_ped_tracks(traj_dir, seq, ped_filter, tier)
     if not tracks:
-        raise SystemExit(f"No GOLD trajectories for seq {seq} ({ped_filter=}) in {traj_dir}")
+        raise SystemExit(f"No {tier} trajectories for seq {seq} ({ped_filter=}) in {traj_dir}")
     colors = {t["id"]: np.array(_PALETTE[i % len(_PALETTE)]) for i, t in enumerate(tracks)}
 
-    # Action-QC overlay (Step 2): per-track banner + road-crossing-onset flag. The ego-corridor
-    # swept-path ribbon is benched (road, not corridor, is the label); its draw path stays dormant
-    # and only activates if a record still carries corridor `params` (none do post-2026-07-08).
+    # Action-QC overlay (Step 2): per-track banner + road-crossing-onset flag.
     actions = load_actions(actions_dir, seq, tracks) if actions_dir else {}
     action_list = [actions[t["full_id"]] for t in tracks if t["full_id"] in actions]
-    corridor_params = action_list[0].get("params") if action_list else None
 
     imgs = sorted((seq_dir / "camera_front_blur").glob("*.jpg"))
     img_ts = np.array([parse_zod_ts(p.stem.rsplit("_", 1)[-1]) for p in imgs])
@@ -345,7 +298,7 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
     # render it at `supersample`x resolution and area-downscale: cheap SSAA that turns the jagged/grainy
     # point splats into smooth dots. Built only for `split` so `camera` stays Open3D-free.
     ss = max(1, int(supersample))
-    renderer, mats, ribbon = None, {}, None
+    renderer, mats = None, {}
     if layout == "split":
         from open3d.visualization import rendering
         renderer = rendering.OffscreenRenderer(rwidth * ss, rheight * ss)
@@ -358,9 +311,6 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
         mats["pcd"] = rendering.MaterialRecord(); mats["pcd"].shader = "defaultUnlit"; mats["pcd"].point_size = point_size * ss
         mats["line"] = rendering.MaterialRecord(); mats["line"].shader = "unlitLine"; mats["line"].line_width = 8.0 * ss
         mats["coast"] = rendering.MaterialRecord(); mats["coast"].shader = "unlitLine"; mats["coast"].line_width = 3.0 * ss
-        mats["corridor"] = rendering.MaterialRecord(); mats["corridor"].shader = "unlitLine"; mats["corridor"].line_width = 4.0 * ss
-        if corridor_params is not None:
-            ribbon = _swept_path_ribbon_world(em, corridor_params.get("corridor_half_width_m", 1.5), corridor_z)
 
     # Map each crossing track's full id -> the scheduled item ts nearest its onset (t_c), so exactly
     # one rendered frame flags the crossing.
@@ -425,14 +375,8 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
                 look_v = np.array([tgt[0], tgt[1], 0.5])
                 eye_v = np.array([tgt[0] - horiz[0] * follow_dist, tgt[1] - horiz[1] * follow_dist, follow_h])
 
-            corridor_ls = None
-            if ribbon is not None:                            # swept-path ribbon ahead of the ego at ts
-                s_ego = float(np.interp(ts, ribbon["ts"], ribbon["s"]))
-                corridor_ls = _ribbon_lineset(ribbon, s_ego, T_lw,
-                                              corridor_params.get("corridor_lookahead_m", 50.0),
-                                              corridor_params.get("corridor_min_forward_m", 0.0))
             right = _render_cloud_panel(renderer, mats, ss, rwidth, rheight,
-                                        pts_l, intensity, cmap, boxes3d, look_v, eye_v, up, corridor_ls)
+                                        pts_l, intensity, cmap, boxes3d, look_v, eye_v, up)
             left = cv2.resize(cam, (int(cw * rheight / ch), rheight))
             frame = np.hstack([left, right])
         else:  # camera
@@ -441,7 +385,7 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
         dt = ts - keyframe_ts
         fs = max(0.6, frame.shape[0] / 600.0)
         suffix = "tracked in 3D" if layout == "split" else "tracked"
-        msg = f"seq {seq}   t={dt:+.1f}s   {len(active)} GOLD ped(s) {suffix}"
+        msg = f"seq {seq}   t={dt:+.1f}s   {len(active)} {tier} ped(s) {suffix}"
         cv2.putText(frame, msg, (16, int(38 * fs)), cv2.FONT_HERSHEY_SIMPLEX, fs, (20, 20, 20), max(1, int(2 * fs)), cv2.LINE_AA)
         if action_list:
             _draw_action_banner(frame, action_list, keyframe_ts, fs, bool(crossing_now_ids))
@@ -460,6 +404,7 @@ def main() -> None:
     ap.add_argument("--layout", choices=["split", "camera"], default="split",
                     help="split = camera|3D side-by-side (default); camera = full camera frame only")
     ap.add_argument("--ped", default=None, help="render only this pedestrian (uuid prefix)")
+    add_tier_arg(ap, default="gold")
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR)
     ap.add_argument("--out", type=Path, default=None, help="output mp4 (default: review/{zod|cam}_{seq}.mp4)")
     ap.add_argument("--window", type=float, default=8.0, help="seconds centred on the keyframe")
@@ -486,9 +431,8 @@ def main() -> None:
     ap.add_argument("--det-dir", type=Path, default=DEFAULT_DET_DIR, help="Step 0 2D-detection cache dir")
     ap.add_argument("--actions-dir", type=Path, default=DEFAULT_ACTION_DIR, help="Step 2 action-record dir")
     ap.add_argument("--show-action", action="store_true",
-                    help="overlay Step-2 action label(s) + ego corridor (auto-on with --ped)")
+                    help="overlay Step-2 action label(s) (auto-on with --ped)")
     ap.add_argument("--no-action", action="store_true", help="disable the action-QC overlay entirely")
-    ap.add_argument("--corridor-z", type=float, default=0.0, help="ground height of the corridor strip (ego-frame m)")
     args = ap.parse_args()
 
     det_path = cache_path(args.det_dir, args.seq)
@@ -507,8 +451,8 @@ def main() -> None:
                      scale=args.scale, rwidth=args.rwidth, rheight=args.rheight, eye=args.eye,
                      look=args.look, up=args.up, point_size=args.point_size, cmap=args.cmap,
                      max_points=args.max_points, match_tol=args.match_tol, ped_filter=args.ped,
-                     follow_dist=args.follow_dist, follow_h=args.follow_height, supersample=args.supersample,
-                     actions_dir=actions_dir, corridor_z=args.corridor_z)
+                     tier=args.tier, follow_dist=args.follow_dist, follow_h=args.follow_height,
+                     supersample=args.supersample, actions_dir=actions_dir)
     print(f"wrote {n} frames → {out}")
 
 
