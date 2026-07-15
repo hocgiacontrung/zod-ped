@@ -39,18 +39,17 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List
 
 import numpy as np
 
 from zodped.dataset.keyframe import (
-    MAX_LIDAR_GAP_S, GtBox, lidar_ts_from_filename, load_keyframe_pedestrians,
-    load_xyzi, parse_zod_ts,
+    MAX_LIDAR_GAP_S, GtBox, load_keyframe_pedestrians, parse_zod_ts,
 )
 from zodped.labeling.boxes import assemble_track_boxes
 from zodped.labeling.detection_cache import cache_path, cached_detector, decode_detections, read_doc
 from zodped.labeling.detector import make_detector
-from zodped.labeling.frustum import lift_image_detections
+from zodped.labeling.frustum import build_candidate_pool
 from zodped.labeling.tracker import track_pedestrian_from_detections
 from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration
@@ -91,51 +90,6 @@ def resolve_detector(seq_id: str, live: LazyDetector, args: argparse.Namespace):
         print(f"  [warn] {seq_id}: --conf {args.conf} is below the cache floor "
               f"{meta.get('conf')}; boxes under the floor were never cached")
     return cached_detector(decode_detections(doc, min_conf=args.conf))
-
-
-def _image_table(seq_dir: Path, camera: str) -> Tuple[List[Path], np.ndarray]:
-    """Return (image paths, their Unix timestamps) for a sequence's camera stream, sorted."""
-    files = sorted((seq_dir / camera).glob("*.jpg"))
-    ts = np.array([parse_zod_ts(f.stem.rsplit("_", 1)[-1]) for f in files])
-    return files, ts
-
-
-def build_candidate_pool(
-    seq_dir: Path, detector, em: dict, lidar_ext: np.ndarray, calib: dict,
-    args: argparse.Namespace,
-) -> List[Tuple[float, np.ndarray, np.ndarray]]:
-    """Lift every LiDAR scan's 2D detections to world-frame candidates (once per sequence).
-
-    Scan-driven (LiDAR is the depth source): each scan is paired with the nearest camera image
-    within --max-gap; scans with no close image are skipped. Detector results are cached per
-    image, since consecutive scans can share one image.
-    """
-    img_paths, img_ts = _image_table(seq_dir, args.camera)
-    scans = sorted((seq_dir / "lidar_velodyne").glob("*.npy"))
-    if not img_paths or not scans:
-        return []
-
-    det_cache: Dict[Path, list] = {}
-    pool: List[Tuple[float, np.ndarray, np.ndarray]] = []
-    for scan in scans:
-        scan_ts = lidar_ts_from_filename(scan.name)
-        j = int(np.argmin(np.abs(img_ts - scan_ts)))
-        if abs(img_ts[j] - scan_ts) > args.max_gap:
-            continue
-        img_path = img_paths[j]
-        if img_path not in det_cache:
-            det_cache[img_path] = detector(img_path)
-        boxes = det_cache[img_path]
-
-        points = load_xyzi(scan)[:, :3].astype(np.float64)
-        T_world_lidar = get_T_world_lidar(em, lidar_ext, scan_ts)
-        lifts = lift_image_detections(
-            boxes, points, calib, T_world_lidar, args.box_shrink, args.slab, args.min_pts,
-        )
-        cand_world = np.array([lf.center_world for lf in lifts], dtype=np.float64).reshape(-1, 3)
-        cand_n = np.array([lf.n_points for lf in lifts], dtype=int)
-        pool.append((scan_ts, cand_world, cand_n))
-    return pool
 
 
 def _seed_world(box: GtBox, em: dict, lidar_ext: np.ndarray, keyframe_ts: float) -> np.ndarray:
@@ -189,7 +143,11 @@ def process_sequence(seq_id: str, live_detector: LazyDetector, args: argparse.Na
         return {"seq_id": seq_id, "n_peds": 0, "n_written": 0, "n_pool_frames": 0}
 
     detector = resolve_detector(seq_id, live_detector, args)
-    pool = build_candidate_pool(seq_dir, detector, em, lidar_ext, calib, args)
+    pool = build_candidate_pool(
+        seq_dir, detector, em, lidar_ext, calib,
+        camera=args.camera, max_gap=args.max_gap, box_shrink=args.box_shrink,
+        slab=args.slab, min_pts=args.min_pts,
+    )
     if not pool:
         return {"seq_id": seq_id, "n_peds": len(gold), "n_written": 0, "n_pool_frames": 0,
                 "error": "empty candidate pool (no paired image/LiDAR frames)"}

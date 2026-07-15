@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -49,6 +50,7 @@ from zodped.dataset.keyframe import parse_zod_ts
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"
 DEFAULT_REPORT_PATH = ROOT / "data" / "processed" / "reports" / "trajectories_run_report.json"
+DEFAULT_QUALITY_REPORT = ROOT / "data" / "processed" / "reports" / "trajectory_quality_report.json"
 
 
 def _pool_frames_by_seq(report_path: Path) -> Dict[str, int]:
@@ -137,6 +139,74 @@ def flag_track(m: dict, args: argparse.Namespace) -> List[str]:
     return flags
 
 
+# quality_tier: box-ACCURACY triage, for "keep the good boxes, improve the rest". SHORT is
+# deliberately excluded — a genuinely short but clean track still has accurate boxes; SHORT is a
+# COMPLETENESS signal (did the track span its presence), reported separately, not an accuracy one.
+_TIER_BAD_FLAGS = {"EMPTY", "JITTER"}                              # unusable: no measurement / mis-association
+_TIER_MARGINAL_FLAGS = {"LOW_COVERAGE", "SPARSE_LIFT", "LOW_CONF"}  # measurable but shaky localization
+
+
+def quality_tier(flags: List[str]) -> str:
+    """Box-accuracy tier from a track's QC flags: good | marginal | bad."""
+    fs = set(flags)
+    if fs & _TIER_BAD_FLAGS:
+        return "bad"
+    if fs & _TIER_MARGINAL_FLAGS:
+        return "marginal"
+    return "good"
+
+
+def _sequence_rollup(rows: List[dict]) -> List[dict]:
+    """Per-sequence quality breakdown, ranked cleanest-first (good_frac, then track count)."""
+    by_seq: Dict[str, List[dict]] = defaultdict(list)
+    for r in rows:
+        by_seq[r["seq"]].append(r)
+
+    seqs: List[dict] = []
+    for seq, rs in by_seq.items():
+        n = len(rs)
+        counts = {t: sum(r["quality_tier"] == t for r in rs) for t in ("good", "marginal", "bad")}
+        n_short = sum("SHORT" in r["flags"] for r in rs)
+        seqs.append({
+            "seq": seq,
+            "n_tracks": n,
+            "good": counts["good"],
+            "marginal": counts["marginal"],
+            "bad": counts["bad"],
+            "good_frac": round(counts["good"] / n, 3) if n else 0.0,
+            "short": n_short,
+        })
+    return sorted(seqs, key=lambda s: (-s["good_frac"], -s["n_tracks"]))
+
+
+def _print_sequence_table(seq_rows: List[dict], k: int) -> None:
+    """Show the k cleanest and k roughest sequences (by good_frac) as a supervisor-facing split."""
+    hdr = f"{'seq':<9}{'trk':>4}{'good':>6}{'marg':>6}{'bad':>5}{'good%':>7}"
+    print(f"\n=== per-sequence quality (cleanest {k} / roughest {k} of {len(seq_rows)}) ===")
+    print(hdr)
+    print("-" * len(hdr))
+
+    def line(s: dict) -> str:
+        return (f"{s['seq']:<9}{s['n_tracks']:>4}{s['good']:>6}{s['marginal']:>6}"
+                f"{s['bad']:>5}{100 * s['good_frac']:>6.0f}%")
+
+    for s in seq_rows[:k]:
+        print(line(s))
+    if len(seq_rows) > 2 * k:
+        print("  ...")
+    for s in seq_rows[-k:]:
+        print(line(s))
+
+
+def _print_tier_summary(rows: List[dict]) -> None:
+    """Corpus-level tier counts (the headline 'how much is good' number)."""
+    n = len(rows)
+    counts = {t: sum(r["quality_tier"] == t for r in rows) for t in ("good", "marginal", "bad")}
+    print(f"\n=== quality tiers over {n} tracks ===")
+    for t in ("good", "marginal", "bad"):
+        print(f"  {t:<9} {counts[t]:>5} ({100 * counts[t] / n:.0f}%)" if n else f"  {t}: 0")
+
+
 def _print_summary(rows: List[dict]) -> None:
     """Corpus-level QC summary: flag counts and coverage by anchor occlusion."""
     n = len(rows)
@@ -201,6 +271,9 @@ def main() -> None:
     ap.add_argument("--min-lidar-pts", type=int, default=5, help="flag SPARSE_LIFT below this median in-frustum point count")
     ap.add_argument("--min-conf", type=float, default=0.3, help="flag LOW_CONF below this median Kalman confidence")
     ap.add_argument("--max-speed", type=float, default=3.5, help="flag JITTER above this inter-frame speed (m/s)")
+    ap.add_argument("--report-out", type=Path, default=DEFAULT_QUALITY_REPORT,
+                    help="write the quality report (corpus tiers + per-sequence rollup + per-track tiers)")
+    ap.add_argument("--seq-table-k", type=int, default=15, help="how many cleanest/roughest sequences to print")
     args = ap.parse_args()
 
     pool_frames = _pool_frames_by_seq(args.report_path)
@@ -214,13 +287,14 @@ def main() -> None:
         doc = json.loads(f.read_text())
         m = score_track(doc, pool_frames.get(doc["sequence_id"]))
         m["flags"] = flag_track(m, args)
+        m["quality_tier"] = quality_tier(m["flags"])
         rows.append(m)
 
     if args.csv:
         args.csv.parent.mkdir(parents=True, exist_ok=True)
-        cols = ["seq", "ped", "occlusion", "n_frames", "duration_s", "span_frac", "observed_frac",
-                "real_frac", "n_real", "longest_coast", "n_coast_runs", "median_lidar_pts",
-                "median_conf", "max_speed", "flags"]
+        cols = ["seq", "ped", "occlusion", "quality_tier", "n_frames", "duration_s", "span_frac",
+                "observed_frac", "real_frac", "n_real", "longest_coast", "n_coast_runs",
+                "median_lidar_pts", "median_conf", "max_speed", "flags"]
         with args.csv.open("w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=cols)
             w.writeheader()
@@ -230,6 +304,30 @@ def main() -> None:
 
     _print_queue(rows, args.top)
     _print_summary(rows)
+
+    seq_rows = _sequence_rollup(rows)
+    _print_tier_summary(rows)
+    _print_sequence_table(seq_rows, args.seq_table_k)
+
+    if args.report_out:
+        tier_counts = {t: sum(r["quality_tier"] == t for r in rows) for t in ("good", "marginal", "bad")}
+        report = {
+            "thresholds": {
+                "min_duration_s": args.min_duration, "min_observed": args.min_observed,
+                "min_lidar_pts": args.min_lidar_pts, "min_conf": args.min_conf, "max_speed": args.max_speed,
+            },
+            "tier_rule": {"bad": sorted(_TIER_BAD_FLAGS), "marginal": sorted(_TIER_MARGINAL_FLAGS),
+                          "good": "no accuracy flag (SHORT ignored — completeness, not accuracy)"},
+            "n_tracks": len(rows),
+            "n_sequences": len(seq_rows),
+            "tier_counts": tier_counts,
+            "per_sequence": seq_rows,
+            "per_track": [{"seq": r["seq"], "ped": r["ped"], "quality_tier": r["quality_tier"],
+                           "flags": r["flags"]} for r in rows],
+        }
+        args.report_out.parent.mkdir(parents=True, exist_ok=True)
+        args.report_out.write_text(json.dumps(report, indent=2))
+        print(f"\nquality report ({len(rows)} tracks, {len(seq_rows)} seqs) → {args.report_out}")
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ motion or LiDAR I/O. `position_ego_rel` is per-window and is added during sample
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -274,3 +274,116 @@ def track_pedestrian_from_detections(
 
     records = sorted(bwd + [anchor_record] + fwd, key=lambda r: r["unix_timestamp"])
     return _rts_smooth(records, meas_sigma=meas_sigma)
+
+
+def birth_tracks_from_residual_pool(
+    pool: List[FrameCandidates],
+    *,
+    gate_mahal2: float = _GATE_MAHAL2,
+    max_consecutive_misses: int = 5,
+    meas_sigma: float = _FRUSTUM_MEAS_SIGMA,
+    min_support: int = 4,
+    min_duration_s: float = 1.0,
+) -> List[List[dict]]:
+    """Birth SILVER tracks from frustum candidates that no GOLD anchor claimed (Step 1b).
+
+    Unlike the GOLD linker there is NO keyframe seed, so this is an online multi-object tracker over
+    the UNCLAIMED candidates. Per frame, active CV-Kalman tracks predict and greedily claim the
+    nearest in-gate candidate (cheapest track↔candidate pair first, one candidate per track);
+    candidates nobody claims SEED new tentative tracks; a track ends after `max_consecutive_misses`
+    coasts. A finished track survives only if it gathered `min_support` real observations spanning
+    `min_duration_s` (this filters detector flicker and one-off ghost lifts), then is RTS-smoothed
+    into the standard frame schema. Boxes/size are the caller's responsibility — SILVER uses a
+    pedestrian size PRIOR, since no keyframe extent exists for a detector-born track.
+
+    Returns a list of smoothed tracks (each a list of frame dicts).
+    """
+    R = np.eye(3) * meas_sigma ** 2
+    P0 = np.diag([_INIT_POS_SIGMA ** 2] * 3 + [_INIT_VEL_SIGMA ** 2] * 3)
+
+    def _record(ts: float, meas: Optional[np.ndarray], n_pts: int, observed: bool) -> dict:
+        return {"unix_timestamp": ts, "measurement": meas, "tracking_method": "forward",
+                "num_lidar_points": n_pts, "in_observation": observed}
+
+    active: List[dict] = []
+    finished: List[dict] = []
+
+    for ts, cand_world, cand_n in sorted(pool, key=lambda f: f[0]):
+        # 1. Predict every active track to this frame's time.
+        for tr in active:
+            dt = ts - tr["last_ts"]
+            if dt <= 0:
+                dt = _DT_NOMINAL
+            F = _F(dt)
+            tr["x"] = F @ tr["x"]
+            tr["P"] = F @ tr["P"] @ F.T + _Q(dt)
+            tr["last_ts"] = ts
+
+        # 2. Global nearest-first association: cheapest (track, candidate) pair wins, one each.
+        matched: Dict[int, int] = {}
+        taken_c: set = set()
+        if len(cand_world) and active:
+            pairs: List[Tuple[float, int, int]] = []
+            for ti, tr in enumerate(active):
+                S_inv = np.linalg.inv(_H @ tr["P"] @ _H.T + R)
+                innov = cand_world - (_H @ tr["x"])
+                m2 = np.einsum("ki,ij,kj->k", innov, S_inv, innov)
+                for cj in range(len(cand_world)):
+                    if m2[cj] <= gate_mahal2:
+                        pairs.append((float(m2[cj]), ti, cj))
+            taken_t: set = set()
+            for _, ti, cj in sorted(pairs):
+                if ti in taken_t or cj in taken_c:
+                    continue
+                taken_t.add(ti)
+                taken_c.add(cj)
+                matched[ti] = cj
+
+        # 3. Update matched tracks; coast the rest.
+        for ti, tr in enumerate(active):
+            if ti in matched:
+                cj = matched[ti]
+                z = cand_world[cj]
+                S = _H @ tr["P"] @ _H.T + R
+                K = tr["P"] @ _H.T @ np.linalg.inv(S)
+                tr["x"] = tr["x"] + K @ (z - _H @ tr["x"])
+                tr["P"] = (np.eye(_STATE_DIM) - K @ _H) @ tr["P"]
+                tr["misses"] = 0
+                tr["records"].append(_record(ts, z, int(cand_n[cj]), True))
+            else:
+                tr["misses"] += 1
+                tr["records"].append(_record(ts, None, -1, False))
+
+        # 4. Birth new tentative tracks from unclaimed candidates.
+        for cj in range(len(cand_world)):
+            if cj in taken_c:
+                continue
+            active.append({
+                "x": np.concatenate([cand_world[cj], np.zeros(3)]),
+                "P": P0.copy(),
+                "last_ts": ts,
+                "misses": 0,
+                "records": [_record(ts, cand_world[cj], int(cand_n[cj]), True)],
+            })
+
+        # 5. Retire tracks that have coasted past the miss budget.
+        keep: List[dict] = []
+        for tr in active:
+            (finished if tr["misses"] >= max_consecutive_misses else keep).append(tr)
+        active = keep
+
+    finished.extend(active)
+
+    # 6. Confirm + smooth: drop trailing coasts, gate on support/duration, RTS-smooth survivors.
+    tracks: List[List[dict]] = []
+    for tr in finished:
+        records = tr["records"]
+        while records and records[-1]["measurement"] is None:
+            records.pop()
+        real = [r for r in records if r["measurement"] is not None]
+        if len(real) < min_support:
+            continue
+        if real[-1]["unix_timestamp"] - real[0]["unix_timestamp"] < min_duration_s:
+            continue
+        tracks.append(_rts_smooth(records, meas_sigma=meas_sigma))
+    return tracks

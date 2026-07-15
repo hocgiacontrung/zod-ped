@@ -15,9 +15,13 @@ the whole cloud and equivalent for a single point.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
+
+# A per-frame candidate pool entry: (scan unix ts, world positions (K,3), per-candidate point counts (K,)).
+FrameCandidates = Tuple[float, np.ndarray, np.ndarray]
 
 
 def lift_box_to_3d(box_xyxy: np.ndarray, uv: np.ndarray, pts: np.ndarray,
@@ -91,3 +95,54 @@ def lift_image_detections(
         center_world = (T_world_lidar @ np.append(center_lidar, 1.0))[:3]
         lifts.append(FrustumLift(center_world=center_world, n_points=n, score=float(box.score)))
     return lifts
+
+
+def build_candidate_pool(
+    seq_dir: Path,
+    detector,
+    em: dict,
+    lidar_ext: np.ndarray,
+    calib: dict,
+    *,
+    camera: str,
+    max_gap: float,
+    box_shrink: float,
+    slab: float,
+    min_pts: int,
+) -> List[FrameCandidates]:
+    """Lift every LiDAR scan's 2D detections to world-frame candidates (once per sequence).
+
+    Scan-driven (LiDAR is the depth source): each scan is paired with the nearest camera image
+    within `max_gap`; scans with no close image are skipped. Detector results are cached per image,
+    since consecutive scans can share one image. The pool is pedestrian-independent — GOLD threads
+    keyframe-anchored peds through it (scripts/01_generate_trajectories.py) and SILVER births tracks
+    from the candidates GOLD leaves unclaimed (scripts/01b_generate_silver.py).
+    """
+    from zodped.dataset.keyframe import lidar_ts_from_filename, load_xyzi, parse_zod_ts
+    from zodped.utils.ego_motion import get_T_world_lidar
+
+    img_paths = sorted((seq_dir / camera).glob("*.jpg"))
+    img_ts = np.array([parse_zod_ts(p.stem.rsplit("_", 1)[-1]) for p in img_paths])
+    scans = sorted((seq_dir / "lidar_velodyne").glob("*.npy"))
+    if not len(img_paths) or not scans:
+        return []
+
+    det_cache: dict = {}
+    pool: List[FrameCandidates] = []
+    for scan in scans:
+        scan_ts = lidar_ts_from_filename(scan.name)
+        j = int(np.argmin(np.abs(img_ts - scan_ts)))
+        if abs(img_ts[j] - scan_ts) > max_gap:
+            continue
+        img_path = img_paths[j]
+        if img_path not in det_cache:
+            det_cache[img_path] = detector(img_path)
+        boxes = det_cache[img_path]
+
+        points = load_xyzi(scan)[:, :3].astype(np.float64)
+        T_world_lidar = get_T_world_lidar(em, lidar_ext, scan_ts)
+        lifts = lift_image_detections(boxes, points, calib, T_world_lidar, box_shrink, slab, min_pts)
+        cand_world = np.array([lf.center_world for lf in lifts], dtype=np.float64).reshape(-1, 3)
+        cand_n = np.array([lf.n_points for lf in lifts], dtype=int)
+        pool.append((scan_ts, cand_world, cand_n))
+    return pool
