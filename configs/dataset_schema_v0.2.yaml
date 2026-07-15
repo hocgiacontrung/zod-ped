@@ -27,6 +27,15 @@
 #     when); the geometric feet-on-road test is the validation ANCHOR, not final label. INTENT
 #     is per-window and a SEPARATE later step.
 #     Replaced the stale v0.1-era rule/pose/VLM method mix. Action ≠ intent — never conflate.
+#   - 2026-07-15 (b): Step 3 IMPLEMENTED (scripts/03_assemble_samples.py, zodped.labeling.samples).
+#     Additions the implementation materialises: sample.anchor_tte_s + sample.window_kind (window
+#     provenance), intent.labels_by_horizon (label per horizon; scalar `label` reads at the
+#     window's own anchor TTE), multimodal.camera_frames[].bbox_xyxy (+ bbox_source,
+#     n_box_corners_visible — the tracked 3D box projected per camera frame: the observation
+#     input of the JAAD/PIE model family, defined on coasted frames too), and
+#     context.observed_fraction_window. distance_to_road_m is measured against the road SURFACE
+#     in 3D (keyframe-scan LiDAR points inside ego_road, lifted to world) — same point-in-polygon
+#     test as Step 2, no fisheye unprojection.
 #
 # STATUS LEGEND:
 #   [CONFIRMED]  — decided, ready to implement
@@ -52,8 +61,12 @@ windowing:
   # A window is sampled ENDING at t_c − TTE; the label is the FUTURE event at that lead time.
   prediction_horizons_s: [1.0, 1.5, 2.0]
 
-  # [CONFIRMED] For NON-crossers (no t_c), sample a comparison window at closest approach to the
-  # ego ROAD (min distance_to_road_m over the track — the corridor is benched, see `action`).
+  # [CONFIRMED] For NON-crossers (no t_c), sample a comparison window at the closest OBSERVED
+  # approach to the ego ROAD (min distance_to_road_m over frames with a real detection), gated on
+  # min_observed_fraction_comparison=0.7 real detections in the window. Anchoring on the raw
+  # closest approach let the negative class fill with coasted (Kalman-extrapolated) segments —
+  # a label-correlated smoothness artifact models would shortcut on (v1: negatives 0.42
+  # observed_frac vs positives 0.92; fixed 2026-07-15: 0.93 vs 0.92).
   # Optional denser sampling is allowed for trajectory-prediction experiments, but the
   # crossing-prediction benchmark split uses the TTE-anchored samples only.
   sampling: tte_anchored
@@ -111,6 +124,9 @@ sample:
   keyframe_timestamp: str        # UTC timestamp of ZOD annotation frame
                                  # Note: keyframe is the central frame of the full
                                  # 20s sequence, not necessarily inside this window
+  # [CONFIRMED] Window provenance (Step 3): how this window was sampled.
+  window_kind: tte_anchored | closest_approach   # crosser TTE window vs non-crosser comparison
+  anchor_tte_s: float            # the TTE this window was anchored at; null for comparison windows
 
 
   # ─────────────────────────────────────────
@@ -175,6 +191,14 @@ sample:
     # t_c's provenance (geometry today; consensus-validated once the action labeler lands).
     crossing_definition: t_c ∈ [window_end, window_end + horizon]   # road onset; see `action`
 
+    # [CONFIRMED] The per-horizon evaluation above, materialised: one label per horizon. The
+    # scalar `label` reads labels_by_horizon at the window's own anchor_tte_s (comparison
+    # windows: not_crossing across the board). Downstream training picks its horizon here.
+    labels_by_horizon:
+      "1.0": crossing | not_crossing
+      "1.5": crossing | not_crossing
+      "2.0": crossing | not_crossing
+
     # [PLANNED — the step after action consensus] Behavioral intent labeling: judge the window on
     # the pedestrian's own cues — pose / body orientation, gait, attention toward the ego vehicle,
     # social context — the PIE `intention_prob` sense of intent, distinct from the future-event
@@ -238,10 +262,17 @@ sample:
 
   multimodal:
 
-    # [CONFIRMED] Camera — ~5 frames in observation window
+    # [CONFIRMED] Camera — ~5 frames in observation window.
+    # bbox_xyxy = the tracked 3D box projected into this frame (clipped to the image): the
+    # observation input of the JAAD/PIE model family (PV-LSTM / PCPA / pip-thesis), and — unlike
+    # raw Step-0 detections — defined on COASTED frames too. Crops are cut lazily from
+    # path+bbox_xyxy by model adapters (no crop convention baked into the dataset).
     camera_frames:
       - timestamp: str
         path: str                  # relative to data/raw/sequences/XXXXXX/
+        bbox_xyxy: [x1, y1, x2, y2]  # pixels; null if the box projects outside the fisheye FOV
+        bbox_source: projected_3d_box
+        n_box_corners_visible: int   # of 8; <8 ⇒ bbox truncated at the image border
 
     # [CONFIRMED] LiDAR — ~4 scans in observation window
     # Each .npy file: structured array (x, y, z, timestamp, intensity, diode_index)
@@ -274,9 +305,11 @@ sample:
     brake_pedal_ratio: float       # 0.0 – 1.0
 
     # [CONFIRMED] Pedestrian state at window_start (from tracked trajectory)
-    distance_to_ego_m: float       # meters
-    distance_to_road_m: float      # meters to nearest ego road boundary point
+    distance_to_ego_m: float       # meters, at the window midpoint
+    distance_to_road_m: float      # meters to the nearest road-SURFACE point (keyframe-scan LiDAR
+                                   # returns inside ego_road, lifted to world), at the window midpoint
     occlusion: null | Light | Heavy
+    observed_fraction_window: float  # fraction of window trajectory frames with a real detection
 
 
   # ─────────────────────────────────────────
@@ -323,8 +356,11 @@ output_format:
 
 dataset_stats:
   # Working set: 358 sequences with pedestrian annotations + LiDAR on disk.
-  # [PENDING] estimated_total_samples — RECOMPUTE after Step 2/3 (windows materialise + filter).
-  estimated_total_samples: TBD
+  # MEASURED (v1 GOLD run 2026-07-15 w/ observed-segment comparison sampling,
+  # samples_run_report.json): 1,087 samples / 933 pedestrians (242 TTE-anchored + 845 comparison);
+  # crossing ratio 8.1% @1.0s / 15.5% @1.5s / 22.3% @2.0s.
+  # [PENDING] supervisor confirmation + SILVER pour (re-run with --tier all).
+  estimated_total_samples: 1087   # GOLD v1; grows with SILVER
 
   # [PENDING] confirm split ratio
   estimated_split:

@@ -33,7 +33,7 @@
   - Output: per-track action record (data/processed/actions/{seq_id}_{pedestrian_id}.json).
 
         ↓
-[Step 3] Sample Assembly + Intent Labeling  (scripts/03_assemble_samples.py — per (ped, window))
+[Step 3] Sample Assembly + Intent Labeling  (scripts/03_assemble_samples.py — per (ped, window))   [BUILT — v1 GOLD run 2026-07-15]
   - Materialise the samples and attach the forward-looking INTENT label, derived from the Step-2 action:
       * TTE-anchored windows: for a crosser, observation windows ENDING at t_c − TTE (the model sees motion BEFORE the event); comparison windows for non-crossers. (Not a dense stride grid — that re-introduces trivial in/post-crossing windows.)
       * per-window filters from the TRACKED position at the window midpoint: distance_to_ego_m ≤ 50.0, distance_to_road_m ≤ 15.0; data-availability ≥ min LiDAR scans, camera frame present.
@@ -42,6 +42,17 @@
       * intent label per horizon h ∈ {1.0, 1.5, 2.0}s: will the ped start crossing within [window_end, window_end + h]? (forward-looking, NOT "crosses inside this window").
         v1 ROUGH intent = derived straight from the Step-2 action's t_c (TTE derivation). Behavioral intent labeling (pose / attention / social cues) is its own later step. Model consensus labels the ACTION (Step 2), NOT intent — see "Action label source".
   - Output: data/annotations/{sample_id}.json + data/annotations/dataset_index.parquet.
+  - v1 GOLD run (2026-07-15, samples_run_report.json): 1,087 samples / 933 peds, 0 failures.
+    242 TTE-anchored + 845 comparison; crossing ratio 8.1% @1.0s / 15.5% @1.5s / 22.3% @2.0s.
+    Biggest filter cut: distance_to_ego (460 windows — many peds cross >50 m ahead of the ego).
+    Also emits per-camera-frame bbox_xyxy (projected 3D box — the JAAD/PIE-family model input,
+    defined on coasted frames too).
+  - CONFOUND FIXED (same day): comparison windows anchor on the closest OBSERVED road approach
+    and require ≥0.7 real-detection fraction (`min_observed_fraction_comparison`). Before: the
+    negative class averaged 0.42 observed_frac vs 0.92 for positives — a label-correlated
+    smoothness artifact (coasting ⇒ not_crossing) models would shortcut on. After: 0.93 vs 0.92 —
+    classes matched on track quality. Cost: 141 non-crossers with no clean observed window
+    produce no sample (counted: comparison_window_unobserved).
 
         ↓
 [Step 4] Dataset Packaging + QA
