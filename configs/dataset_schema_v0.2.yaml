@@ -118,24 +118,24 @@ sample:
   # sample of that pedestrian. Do NOT conflate with `intent` below — intent is the forward-looking
   # per-window PREDICTION derived from this action.
   action:
-    # [CONFIRMED] PRIMARY label — does the track enter the ego vehicle's SWEPT PATH (corridor),
-    # built from ego_motion.poses + vehicle width in the world frame. This is the JAAD/PIE
-    # "crossing in front of the ego" notion and the benchmark label.
-    crosses_ego_corridor: bool
+    # [CONFIRMED] CROSSING ACTION — does the track put its feet on the ego_road drivable-surface
+    # polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-
+    # limited). This is the JAAD/PIE "crossing the roadway" notion. It is the geometric GROUND-TRUTH
+    # ANCHOR the model-based crossing-action labeler (Step 3) is validated against — NOT itself the
+    # shipped per-window label.
+    crosses_ego_road: bool
 
-    # [CONFIRMED] Crossing onset — timestamp of first corridor entry. Drives Step-3 TTE anchoring.
-    # null when crosses_ego_corridor = false or action = undetermined.
+    # [CONFIRMED] Crossing onset — timestamp of the first frame on the ego road.
+    # null when crosses_ego_road = false or action = undetermined.
     crossing_frame_timestamp: str   # UTC ISO, = t_c
 
-    # [CONFIRMED] Range (m) at t_c — kept as a CONFIDENCE attribute (frustum localization degrades
-    # with range: recall 0.93 <10m → 0.44 >40m). null when no crossing.
-    ego_distance_at_crossing_m: float
-
-    # [CONFIRMED] COMPLEMENT label — does the track cross the ego_road drivable-surface polygon
-    # (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-limited).
-    # Broader "crossing the roadway" notion (≈ JAAD). The JAAD/PIE label is recoverable as
-    # crosses_ego_corridor; crosses_ego_road is the wider behavioural attribute.
-    crosses_ego_road: bool
+    # [BENCHED 2026-07-08] The ego-corridor swept-path label (crosses_ego_corridor +
+    # ego_distance_at_crossing_m) was the old PRIMARY label. The crossing action is now feet-on-road
+    # (the corridor requires no per-frame road, which we only have at the keyframe). The computation
+    # is preserved, dormant, in zodped.labeling.corridor and can be revived as a Step-4 aux feature
+    # (ego-relevance / metric range-to-crossing). Not emitted by the current pipeline.
+    #   crosses_ego_corridor: bool
+    #   ego_distance_at_crossing_m: float
 
     # [CONFIRMED] EMPTY / no-real-motion tracks (real_frac=0; "track" is Kalman coasting from a
     # single anchor) → undetermined. NEVER forced to a crossing decision; kept + flagged, excluded

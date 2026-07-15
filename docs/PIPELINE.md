@@ -1,13 +1,12 @@
 # Pipeline Design & Schema
 
-> These are working decisions, not settled doctrine. If you see a better approach, push back — alternatives and disagreement are welcome. Don't silently follow the doc if something looks wrong, state the trade-off and make the case.
+> These are not settled doctrine. If you see a better approach, push back — alternatives and disagreement are welcome. Don't silently follow the doc if something looks wrong, state the trade-off and make the case.
 
 ## Pipeline Overview
 
-> **Action ≠ intent.** Two distinct labels live at two levels, and we keep them physically separate. The **action** (did this pedestrian cross, and *when*) is a
+> **Action ≠ intent.** Two distinct labels live at two levels. The **action** (did this pedestrian cross, and *when*) is a
 > geometric fact about the whole track — Step 2. The **intent** (given a short observation window *before* the event, will they cross within the horizon) is a forward-looking, TTE-anchored per-window label *derived* from the action — Step 3. Labeling each window by what happens *inside* it would collapse intent prediction into action detection and break comparability with JAAD/PIE.
 
-> **Tier lives only in Step 1.** GOLD vs SILVER differ solely in *how a track is born* (anchor-seeded vs detector-birth). Steps 2–4: same code labels both
 ```
 [pedestrian_sequences.json — sequences with LiDAR on disk]
         ↓
@@ -19,18 +18,17 @@
   - Unit of work: the PEDESTRIAN (one track per pedestrian). Tracks each over the full 20s clip.
   - Measurement = 2D detector box → frustum-lifted to 3D; linker = KF/RTS (associate + coast + smooth); every scan ego-motion-compensated to world frame first.
   - 3D boxes: the shipped per-frame box = tracked centre + rigid keyframe extent + velocity heading (zodped.labeling.boxes.assemble_track_boxes). Clustering is not in the product (see docs/EXPERIMENTS_LOG.md "Boxfit cluster experiment"); box size/yaw come from the keyframe anchor + motion.
-  - Two tiers — the ONLY place the tiers differ (see "Two-tier labels"):
-      * 1a GOLD  (DONE) — anchor-seeded: seed at the verified keyframe box, thread through the pool. 358 seqs → 1,863 tracks.
-      * 1b SILVER (TODO) — birth-seeded: birth tracks from pool candidates no GOLD seed claimed (residual-detection birth + dedup + identity + a size PRIOR, since there is no keyframe extent). Flagged is_in_gold_standard=false.
+  - Two tiers (see "Two-tier labels"):
+      * 1a GOLD  (DONE) — anchor-seeded: seed at verified keyframe box, thread through the pool. 358 seqs → 1,863 tracks.
+      * 1b SILVER (RAN — pending QC) — birth-seeded (`scripts/01b_generate_silver.py`): births tracks from pool candidates no GOLD track claimed (residual pool → online MOT → support/duration confirmation + a size PRIOR). Full 358-seq pass ran: 9,394 tracks (`silver_run_report.json`) — NOT final until QC'd. Flagged.
   - Output: per-pedestrian world-frame trajectory → data/processed/trajectories/{seq_id}_{pedestrian_id}.json (per frame: position + oriented 3D box; position_ego_rel is per-window → added later)
 
         ↓   (Steps 2–4 are same code for GOLD and SILVER tracks)
-[Step 2] Action Labeling  (scripts/02_label_action.py — track-level, geometric, NO filtering)
-  - For each FULL track, compute the crossing ACTION + when it happens. Pure geometry over the whole trajectory.
-      * crosses_ego_corridor : bool — does the track enter the ego vehile's SWEPT PATH (from ego_motion.poses + vehicle width, in the world frame). The JAAD/PIE-comparable "crossing in front of the ego" label; primary.
-      * crossing_frame_timestamp (t_c) — the crossing-onset timestamp (first entry into the corridor); drives Step-3 TTE anchoring.
-      * ego_distance_at_crossing_m — range at t_c, kept as a CONFIDENCE attribute (frustum localization degrades with range).
-      * crosses_ego_road : bool — does the track cross the ego_road drivable-surface polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-limited). Complements the corridor with JAAD's broader "crossing the roadway" notion.
+[Step 2] Action Labeling  (scripts/02_label_action.py — track-level, geometric ANCHOR)
+  - For each FULL track, compute the crossing ACTION (feet on the ego road) + when it happens. Pure geometry over the whole trajectory.
+      * crosses_ego_road : bool — does the track put its feet on the ego_road drivable-surface polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-limited). The JAAD/PIE "crossing the roadway" notion. This is the geometric GROUND-TRUTH ANCHOR the model-based crossing-action labeler (Step 3) is validated against — NOT itself the shipped per-window label.
+      * crossing_frame_timestamp (t_c) — the crossing-onset timestamp (first frame on the road).
+  - BENCHED (2026-07-08): the ego-corridor swept-path label (`crosses_ego_corridor` + `ego_distance_at_crossing_m`) was the old primary. The label is now feet-on-road; corridor needs no per-frame road. Its computation is kept dormant in `zodped.labeling.corridor`, re-derivable as a Step-4 aux feature (ego-relevance / metric range-to-crossing). See EXPERIMENTS_LOG.
   - EMPTY / no-real-motion tracks (real_frac=0; the "track" is Kalman coasting from a single anchor) → action = undetermined. 
     NEVER forced to crossing/not_crossing — kept + flagged (a verified ped we could not track).
   - Output: per-track action record (data/processed/actions/{seq_id}_{pedestrian_id}.json).
@@ -116,7 +114,7 @@ Full, authoritative field-by-field spec → **`configs/dataset_schema_v0.2.yaml`
 
 - **Windowing**: 0.5 s observation window, prediction horizons [1.0, 1.5, 2.0] s, TTE-anchored on the Step-2 crossing onset (not a dense stride grid).
 - **Sample unit**: per (pedestrian, window); `sample_id = {seq}_{ped}_{window_start_ms}`. Carries the forward-looking intent label (+ soft label), the per-frame trajectory (world + ego-relative), multimodal file pointers, ego/pedestrian context, and metadata (incl. the GOLD/SILVER tier flags).
-- **Action vs intent**: Step 2 emits the track-level **action** (`crosses_ego_corridor` + `crossing_frame_timestamp` (`t_c`), plus `crosses_ego_road`; EMPTY tracks → `undetermined`); Step 3 derives the per-window **intent** label from `t_c` (crosses within `[window_end, window_end + h]`). The two never share a field.
+- **Action vs intent**: Step 2 emits the track-level **action** (`crosses_ego_road` + `crossing_frame_timestamp` (`t_c`); EMPTY tracks → `undetermined`) as the geometric ground-truth ANCHOR; Step 3 produces the per-window forward-looking **crossing-action** label — label source under revision, moving from pure geometry to a model-consensus labeler validated against this anchor (see `docs/JAAD_PIE_ALIGNMENT.md`). The two never share a field.
 - **Filters by stage**: Step 1 selects pedestrians with a 3D keyframe box (`require_3d_annotation`); Step 2 (action) applies **no** filter — it labels every track; Step 3 (assembly) applies the per-window gates from TRACKED positions — proximity (`distance_to_ego ≤ 50 m`, `distance_to_road ≤ 15 m`, at the window midpoint) and data-availability (`min_lidar_frames_in_window`). Proximity is deferred to Step 3 because the single keyframe annotation is a poor proxy for windows up to ~14 m away; a keyframe LiDAR-in-box check is *not* a hard filter (GOLD seeds geometrically).
 - **Output**: one JSON per sample + a Parquet index of all scalar fields (fast filtering).
 - **Scale (target, PENDING)**: ~10–15 windows/seq after filtering across the 358-seq working set; total sample count + crossing ratio to be recomputed after Step 2/3 and confirmed with supervisor.

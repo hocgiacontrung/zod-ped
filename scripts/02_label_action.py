@@ -3,13 +3,13 @@
 Reads every Step-1 GOLD trajectory (data/processed/trajectories/{seq}_{ped}.json) and writes one
 action record per track (data/processed/actions/{seq}_{ped}.json) with the crossing ACTION:
 
-  * crosses_ego_corridor (primary) + crossing_frame_timestamp (t_c) + ego_distance_at_crossing_m
-  * crosses_ego_road (complement, via the keyframe camera)
+  * crosses_ego_road (feet on the ego_road polygon, via the keyframe camera) + crossing_frame_timestamp
   * status = determined | undetermined  (EMPTY tracks → undetermined; kept + flagged, never forced)
 
-This is pure geometry over the smoothed world-frame trajectory. The crossing onset t_c drives Step-3 TTE anchoring. 
-Runs on GOLD now, and on SILVER tracks unchanged once Step 1b exists. See docs/PIPELINE.md and the
-geometry in src/zodped/labeling/actions.py.
+This is pure geometry over the smoothed world-frame trajectory. `crosses_ego_road` is the geometric
+GROUND-TRUTH ANCHOR for the model-based crossing-action labeler (Step 3), not itself the shipped
+per-window label. The ego-corridor swept-path signal is benched (zodped.labeling.corridor, dormant);
+see docs/PIPELINE.md and the geometry in src/zodped/labeling/actions.py.
 
 Usage:
     python scripts/02_label_action.py --max-seqs 2     # smoke test
@@ -27,10 +27,7 @@ from typing import Dict, List
 import numpy as np
 
 from zodped.dataset.keyframe import parse_zod_ts
-from zodped.labeling.actions import (
-    CORRIDOR_HALF_WIDTH_M, CORRIDOR_LOOKAHEAD_M, CORRIDOR_MIN_FORWARD_M,
-    label_track_action, load_ego_road_polygons,
-)
+from zodped.labeling.actions import label_track_action, load_ego_road_polygons
 from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration
 
@@ -66,11 +63,7 @@ def process_sequence(seq_id: str, traj_paths: List[Path], args: argparse.Namespa
     records: List[dict] = []
     for path in traj_paths:
         trajectory = json.loads(path.read_text())
-        record = label_track_action(
-            trajectory, em, calib, polygons, T_world_lidar_kf,
-            half_width_m=args.corridor_half_width, lookahead_m=args.corridor_lookahead,
-            min_forward_m=args.corridor_min_forward,
-        )
+        record = label_track_action(trajectory, calib, polygons, T_world_lidar_kf)
         (args.out_dir / path.name).write_text(json.dumps(record))
         records.append(record)
     return records
@@ -79,15 +72,12 @@ def process_sequence(seq_id: str, traj_paths: List[Path], args: argparse.Namespa
 def _summarise(records: List[dict]) -> dict:
     """Aggregate counts + the crossing rate over DETERMINED tracks (the labelable set)."""
     determined = [r for r in records if r["status"] == "determined"]
-    corr = sum(bool(r["crosses_ego_corridor"]) for r in determined)
     road = sum(bool(r["crosses_ego_road"]) for r in determined)
     return {
         "n_tracks": len(records),
         "n_determined": len(determined),
         "n_undetermined": len(records) - len(determined),
-        "n_crosses_ego_corridor": corr,
         "n_crosses_ego_road": road,
-        "corridor_crossing_rate": round(corr / len(determined), 4) if determined else None,
         "road_crossing_rate": round(road / len(determined), 4) if determined else None,
     }
 
@@ -97,9 +87,6 @@ def main() -> None:
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR, help="Step 1 trajectory JSONs")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="per-track action JSONs")
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="run report (out of the data dir)")
-    ap.add_argument("--corridor-half-width", type=float, default=CORRIDOR_HALF_WIDTH_M, help="ego-corridor half-width (m)")
-    ap.add_argument("--corridor-lookahead", type=float, default=CORRIDOR_LOOKAHEAD_M, help="max forward range counted as in-front (m)")
-    ap.add_argument("--corridor-min-forward", type=float, default=CORRIDOR_MIN_FORWARD_M, help="near edge of the corridor strip (m)")
     ap.add_argument("--max-seqs", type=int, default=None, help="cap sequences (smoke test)")
     args = ap.parse_args()
 
@@ -124,11 +111,6 @@ def main() -> None:
 
     summary = _summarise(all_records)
     report = {
-        "config": {
-            "corridor_half_width_m": args.corridor_half_width,
-            "corridor_lookahead_m": args.corridor_lookahead,
-            "corridor_min_forward_m": args.corridor_min_forward,
-        },
         "n_sequences": len(seq_ids),
         "summary": summary,
         "failures": failures,
@@ -139,8 +121,6 @@ def main() -> None:
     print(f"\nDone. {summary['n_tracks']} tracks "
           f"({summary['n_determined']} determined / {summary['n_undetermined']} undetermined, "
           f"{len(failures)} seq failures).")
-    print(f"  corridor crossings: {summary['n_crosses_ego_corridor']} "
-          f"(rate {summary['corridor_crossing_rate']} over determined)")
     print(f"  ego_road crossings: {summary['n_crosses_ego_road']} "
           f"(rate {summary['road_crossing_rate']} over determined)")
     print(f"  report → {args.report_path}")

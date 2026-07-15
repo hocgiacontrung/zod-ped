@@ -21,12 +21,10 @@ frames draw a hollow marker labelled "coast", and detector boxes no pedestrian c
 Only GOLD tier (keyframe-anchored pedestrians) is drawn; SILVER (detector-found) is not built yet.
 
 Action-QC overlay (Step 2): with ``--ped`` (or ``--show-action``) the Step-2 action record is read and
-the render is annotated so a crossing label can be eyeballed against the geometry — a per-track banner
-(CROSSES CORRIDOR + t_c + range / no-cross + min lateral / undetermined), a red flash on the box and
-frame at the crossing-onset (t_c) frame, and, in ``split``, the ego swept-path CORRIDOR drawn on the
-ground of the 3D panel (the ego's CURVED swept-path ribbon ahead of it — the exact geometry the label
-uses, so it follows the road through turns). This is the manual check for the corridor label: watch the
-box enter (or miss) the orange ribbon. ``--no-action`` disables it.
+the render is annotated so the crossing label can be eyeballed — a per-track banner (CROSSES ROAD + t_c
+/ no road cross / undetermined) and a red flash on the box and frame at the crossing-onset (t_c) frame.
+The crossing action is now feet-on-ego-road; the ego swept-path CORRIDOR ribbon is benched (dormant
+draw path, only shown if a record still carries corridor ``params``). ``--no-action`` disables it.
 
 Usage:
     python scripts/viz_render_video.py --seq 000007
@@ -112,18 +110,14 @@ def load_actions(actions_dir: Path, seq: str, tracks: List[dict]) -> dict:
 
 
 def _fmt_action(action: dict, keyframe_ts: float) -> Tuple[str, tuple]:
-    """One-line banner text + BGR colour for a track's action record."""
+    """One-line banner text + BGR colour for a track's action record (crossing = feet on ego road)."""
     pid = action["pedestrian_id"][:8]
     if action.get("status") != "determined":
         return f"{pid}: UNDETERMINED (empty track)", (140, 140, 140)
-    if action.get("crosses_ego_corridor"):
+    if action.get("crosses_ego_road"):
         tc = parse_zod_ts(action["crossing_frame_timestamp"]) - keyframe_ts
-        d = action.get("ego_distance_at_crossing_m")
-        return (f"{pid}: CROSSES CORRIDOR  t_c={tc:+.1f}s  d={d:.1f}m  road={action['crosses_ego_road']}",
-                (60, 200, 60))
-    lat = (action.get("diagnostics") or {}).get("min_lateral_dist_m")
-    lat_s = f"{lat:.2f}m" if lat is not None else "n/a"
-    return f"{pid}: no cross  |lat|min={lat_s}  road={action['crosses_ego_road']}", (40, 190, 235)
+        return f"{pid}: CROSSES ROAD  t_c={tc:+.1f}s", (60, 200, 60)
+    return f"{pid}: no road cross", (40, 190, 235)
 
 
 def _draw_action_banner(img: np.ndarray, actions: List[dict], keyframe_ts: float,
@@ -319,10 +313,12 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
         raise SystemExit(f"No GOLD trajectories for seq {seq} ({ped_filter=}) in {traj_dir}")
     colors = {t["id"]: np.array(_PALETTE[i % len(_PALETTE)]) for i, t in enumerate(tracks)}
 
-    # Action-QC overlay (Step 2): per-track banner + crossing-onset flag + ego corridor in the 3D panel.
+    # Action-QC overlay (Step 2): per-track banner + road-crossing-onset flag. The ego-corridor
+    # swept-path ribbon is benched (road, not corridor, is the label); its draw path stays dormant
+    # and only activates if a record still carries corridor `params` (none do post-2026-07-08).
     actions = load_actions(actions_dir, seq, tracks) if actions_dir else {}
     action_list = [actions[t["full_id"]] for t in tracks if t["full_id"] in actions]
-    corridor_params = action_list[0]["params"] if action_list else None
+    corridor_params = action_list[0].get("params") if action_list else None
 
     imgs = sorted((seq_dir / "camera_front_blur").glob("*.jpg"))
     img_ts = np.array([parse_zod_ts(p.stem.rsplit("_", 1)[-1]) for p in imgs])
@@ -372,7 +368,7 @@ def render_video(seq: str, layout: str, traj_dir: Path, out_path: Path, window_s
     crossing_ts_by_id: dict = {}
     for t in tracks:
         act = actions.get(t["full_id"])
-        if act and act.get("status") == "determined" and act.get("crosses_ego_corridor"):
+        if act and act.get("status") == "determined" and act.get("crosses_ego_road"):
             tc = parse_zod_ts(act["crossing_frame_timestamp"])
             crossing_ts_by_id[t["full_id"]] = item_ts[int(np.argmin(np.abs(item_ts - tc)))]
 

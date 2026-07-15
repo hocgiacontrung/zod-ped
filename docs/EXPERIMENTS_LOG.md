@@ -110,6 +110,27 @@ unchanged and kept as the complement. Viz (`viz_render_video.py`) now draws the 
 with supervisor whether the crossing-prediction benchmark uses the strict corridor alone or unions
 in `ego_road` (the union option was considered and deferred).
 
+## Step 2 corridor BENCHED — crossing action = feet on ego road (2026-07-08)
+
+**Decision (supervisor review).** The crossing ACTION is redefined as *feet on the ego road*
+(`crosses_ego_road`), not entry into the ego swept path (`crosses_ego_corridor`). Two consequences:
+
+1. **Corridor is no longer a label.** We only have the `ego_road` polygon at the keyframe (image-
+   pixel, one frame per sequence), so a road-membership test is FOV/range-limited — but that IS the
+   agreed definition, and a camera model can emit it per-frame without us ever having per-frame road.
+   The corridor's value (metric range-to-crossing, ego-relevance) is real but is a *feature*, not the
+   label, so it moves to Step 4.
+2. **Labeling pivots to model consensus.** The per-window crossing-action label (Step 3) moves from
+   pure geometry to a local-model consensus labeler (geometry stays as one voter / the GT anchor).
+   See `docs/JAAD_PIE_ALIGNMENT.md` and PIPELINE.md.
+
+**Change (SHIPPED).** `actions.py` is road-only; the corridor computation is preserved verbatim,
+dormant, in `zodped.labeling.corridor` (pure, deterministic, re-derivable in minutes — benched, not
+deleted, so revival is a function call, not a git revert). `02_label_action.py` and the QC viz drop
+corridor. Re-ran full GOLD: 1,863 tracks, 1,602 determined, **146 `ego_road` crossings (9.11 %)**,
+0 failures — road numbers unchanged from before (only the corridor fields were removed). Record
+schema bumped `action/v0.2 → action/v0.3`.
+
 ## Tracker robustness: association in 3D vs 2D-first (2026-07-01, exploratory)
 
 **Symptom.** The linker (`tracker.py`) lifts boxes to 3D then associates in the world frame, so
