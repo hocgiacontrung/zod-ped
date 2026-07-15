@@ -2,16 +2,16 @@
 
 Reads the Step-1 trajectories of the selected tier (`--tier {gold,silver,all}`; default gold until
 SILVER passes QC — GOLD and SILVER share the trajectories dir, so the population is an explicit
-choice, not whatever is on disk) and writes one action record per track
+choice) and writes one action record per track
 (data/processed/actions/{seq}_{ped}.json) with the crossing ACTION:
 
   * crosses_ego_road (feet on the ego_road polygon, via the keyframe camera) + crossing_frame_timestamp
   * status = determined | undetermined  (EMPTY tracks → undetermined; kept + flagged, never forced)
 
 This is pure geometry over the smoothed world-frame trajectory. `crosses_ego_road` is the geometric
-GROUND-TRUTH ANCHOR for the model-based crossing-action labeler (Step 3), not itself the shipped
-per-window label. The ego-corridor swept-path signal is benched (zodped.labeling.corridor, dormant);
-see docs/PIPELINE.md and the geometry in src/zodped/labeling/actions.py.
+ANCHOR for the planned model-consensus ACTION labeler (same track-level verdict — see
+docs/PIPELINE.md "Action label source"), and the acting label until that labeler lands. Per-window
+intent is a separate later step (Step 3). The ego-corridor swept-path signal is benched.
 
 Usage:
     python scripts/02_label_action.py --max-seqs 2     # smoke test

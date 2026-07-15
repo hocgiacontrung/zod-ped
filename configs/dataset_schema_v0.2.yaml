@@ -22,6 +22,11 @@
 #     TBD. Windowing is now TTE-anchored (was a 0.25s dense stride grid). Step renumber: action =
 #     Step 2, sample assembly + intent = Step 3 (filters moved to Step 3). See docs/PIPELINE.md.
 #   - dataset_stats: basis is the 358-sequence working set; totals PENDING recomputation.
+#   - 2026-07-15: reconciled intent + windowing with the 2026-07-08 corridor bench. ACTION label source CONFIRMED as model consensus: 3
+#     local JAAD/PIE-trained models (LSTM-LSTM baseline, LSTM-diffusion, transformer-diffusion) vote on the TRACK-LEVEL verdict (crossed / not, and
+#     when); the geometric feet-on-road test is the validation ANCHOR, not final label. INTENT
+#     is per-window and a SEPARATE later step.
+#     Replaced the stale v0.1-era rule/pose/VLM method mix. Action ≠ intent — never conflate.
 #
 # STATUS LEGEND:
 #   [CONFIRMED]  — decided, ready to implement
@@ -48,24 +53,22 @@ windowing:
   prediction_horizons_s: [1.0, 1.5, 2.0]
 
   # [CONFIRMED] For NON-crossers (no t_c), sample a comparison window at closest approach to the
-  # ego corridor. Optional denser sampling is allowed for trajectory-prediction experiments, but
-  # the crossing-prediction benchmark split uses the TTE-anchored samples only.
+  # ego ROAD (min distance_to_road_m over the track — the corridor is benched, see `action`).
+  # Optional denser sampling is allowed for trajectory-prediction experiments, but the
+  # crossing-prediction benchmark split uses the TTE-anchored samples only.
   sampling: tte_anchored
 
 
 # ─────────────────────────────────────────
 # FILTERING / INCLUSION CRITERIA
 # ─────────────────────────────────────────
-# Split by pipeline stage: selection happens in Step 1 (trajectory generation); Step 2 (action
-# labeling) applies NO filter — it labels every track; all position/availability filters are
-# deferred to Step 3 (sample assembly), where per-frame TRACKED positions exist (the single
-# keyframe annotation is a poor proxy for windows up to ~14m away).
+# Split by pipeline stage: all position/availability filters are
+# deferred to Step 3 (sample assembly), where per-frame TRACKED positions exist
 
 filtering:
 
   # --- Step 1: pedestrian selection (trajectory generation) ---
-  # [CONFIRMED] Skip 2D-only pedestrians (no location_3d) — they cannot anchor a 3D box. (GOLD only;
-  # SILVER peds have no keyframe annotation and are born from detections in Step 1b.)
+  # [CONFIRMED] Skip 2D-only pedestrians (no location_3d).
   require_3d_annotation: true
 
   # [CONFIRMED] A keyframe LiDAR-in-box check is NOT a hard filter. GOLD tracks seed
@@ -113,16 +116,16 @@ sample:
   # ─────────────────────────────────────────
   # ACTION LABEL (track-level — Step 2; denormalised into each of the pedestrian's samples)
   # ─────────────────────────────────────────
-  # The ACTION is a geometric fact about the WHOLE track: did this pedestrian cross, and WHEN.
-  # It is computed once per track in Step 2 (no windows, no filtering) and copied into every
-  # sample of that pedestrian. Do NOT conflate with `intent` below — intent is the forward-looking
-  # per-window PREDICTION derived from this action.
+  # The ACTION is about the WHOLE track: did this pedestrian cross, and WHEN.
+  # It is computed once per track in Step 2 and copied into every
+  # sample of that pedestrian. Do NOT conflate with `intent` (the forward-looking
+  # per-window PREDICTION derived from this action.)
   action:
     # [CONFIRMED] CROSSING ACTION — does the track put its feet on the ego_road drivable-surface
     # polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-
     # limited). This is the JAAD/PIE "crossing the roadway" notion. It is the geometric GROUND-TRUTH
-    # ANCHOR the model-based crossing-action labeler (Step 3) is validated against — NOT itself the
-    # shipped per-window label.
+    # ANCHOR for the model-consensus ACTION labeler (see `method` below) — geometry validates the
+    # consensus verdict, and remains the acting label until that labeler passes its GOLD gate.
     crosses_ego_road: bool
 
     # [CONFIRMED] Crossing onset — timestamp of the first frame on the ego road.
@@ -142,8 +145,15 @@ sample:
     # from intent samples but retained as a verified ped instance we could not track.
     status: determined | undetermined
 
-    # [CONFIRMED] Labeling method for the action (Step 2 is pure geometry).
-    method: rule_based_geometry
+    # [CONFIRMED 2026-07-15] NEXT action-label source = MODEL CONSENSUS on the track-level verdict.
+    # Three local models (LSTM-LSTM encoder-decoder baseline,
+    # LSTM-diffusion, transformer-diffusion; trained on JAAD/PIE) judge the track and vote on
+    # crossed / not crossed + when; the geometric feet-on-road test above is the validation ANCHOR,
+    # and disagreement (model↔model or model↔anchor) routes the track to manual review.
+    # [PENDING] adaptation design — the three are TTE-style window predictors; voting rule; how consensus and geometry combine for t_c; and the GOLD gate
+    # (consensus-vs-geometry agreement) that must PASS before consensus labels at scale.
+    # Current records are geometry-only (method=rule_based_geometry).
+    method: rule_based_geometry | model_consensus
 
 
   # ─────────────────────────────────────────
@@ -151,37 +161,38 @@ sample:
   # ─────────────────────────────────────────
 
   intent:
-    # [CONFIRMED] FORWARD-LOOKING per-window label: given the 0.5s observation window, does the
-    # pedestrian cross the ego corridor within the prediction horizon AFTER window_end. This is a
-    # PREDICTION, not a description of motion inside the window — a ped still on the sidewalk during
-    # the window is labelled `crossing` if they enter the corridor within the horizon (the whole
-    # point of intent estimation; matches PCPA/SF-GRU on JAAD/PIE).
+    # [CONFIRMED] FORWARD-LOOKING per-window label, a SEPARATE step AFTER action labeling: given the
+    # 0.5s observation window, will the pedestrian start crossing (feet on the ego ROAD, see
+    # `action`) within the prediction horizon AFTER window_end. This is a PREDICTION, not a
+    # description of motion inside the window — a ped still on the sidewalk during the window is
+    # labelled `crossing` if they step onto the road within the horizon (the whole point of intent
+    # estimation; matches PCPA/SF-GRU on JAAD/PIE).
     label: crossing | not_crossing | uncertain
 
-    # [CONFIRMED] Definition of "crossing" (resolves the v0.1 TBD): the track's crossing onset t_c
-    # (action.crossing_frame_timestamp) falls within [window_end, window_end + horizon]. Evaluated
-    # per horizon in prediction_horizons_s; `crossing` if it holds for the horizon under evaluation.
-    crossing_definition: t_c ∈ [window_end, window_end + horizon]   # corridor entry; see `action`
+    # [CONFIRMED] v1 ROUGH intent — inferred straight from the ACTION label (resolves the v0.1
+    # TBD): the track's road-crossing onset t_c (action.crossing_frame_timestamp) falls within
+    # [window_end, window_end + horizon]. Evaluated per horizon in prediction_horizons_s. Inherits
+    # t_c's provenance (geometry today; consensus-validated once the action labeler lands).
+    crossing_definition: t_c ∈ [window_end, window_end + horizon]   # road onset; see `action`
+
+    # [PLANNED — the step after action consensus] Behavioral intent labeling: judge the window on
+    # the pedestrian's own cues — pose / body orientation, gait, attention toward the ego vehicle,
+    # social context — the PIE `intention_prob` sense of intent, distinct from the future-event
+    # derivation above. NOTE: ZOD's camera_front_blur anonymises faces, so facial expression / gaze
+    # are unavailable.
+    method: derived_from_action | behavioral | manual
 
     # [CONFIRMED] Confidence score from the labeling pipeline (independent of the label).
-    # High: clearly crosses / clearly stays away. Low: near corridor boundary, or far-range action.
+    # High: t_c far from the horizon boundary on a clean track / clearly stays away.
+    # Low: t_c near the horizon boundary, heavy coasting in the window, or far-range action.
     confidence: float              # 0.0 – 1.0
 
-    # [CONFIRMED] Soft label — class probabilities for training / calibration.
+    # [CONFIRMED] Soft label — class probabilities for training / calibration. v1 rough labels are
+    # hard (one-hot); calibrated soft values arrive with the behavioral labeler.
     soft_label:
       p_crossing: float
       p_not_crossing: float
       p_uncertain: float
-
-    # [CONFIRMED] Labeling method — for transparency and quality analysis
-    method: rule_based | vlm | manual
-
-    # [CONFIRMED] VLM only used for edge cases. Method mix (target):
-    # ~75–80%: rule-based — derive the per-window label from action.t_c × horizon
-    # ~10–15%: pose estimation for ambiguous cases (near-boundary / low-confidence action)
-    # ~5%:     VLM (Gemini free tier or local Llama 3.2 Vision 11B) — always given trajectory
-    #          coordinates in the prompt, not image-only
-    # ~5–10%:  manual gold standard for validation
 
 
   # ─────────────────────────────────────────
@@ -218,11 +229,7 @@ sample:
         # forward: propagated forward from the seed
         # backward: propagated backward from the seed
 
-    # Trajectory generation pipeline (Step 1 — see docs/PIPELINE.md "Architecture"):
-    # 1. Seed: keyframe 3D box (GOLD) / first confident detection (SILVER), lifted to world.
-    # 2. Measure: 2D detector box per scan → frustum lift to a 3D position (in-frustum LiDAR depth).
-    # 3. Compensate: lift every scan to the world frame via ego_motion.json before associating.
-    # 4. Link: constant-velocity Kalman associates + coasts; RTS backward smoothing.
+    # Trajectory generation pipeline (Step 1 — see docs/PIPELINE.md "Architecture")
 
 
   # ─────────────────────────────────────────
@@ -282,7 +289,6 @@ sample:
     collection_date: str           # YYYY-MM-DD
 
     # [PENDING] Split ratio — assigned at SEQUENCE level (not window level) to prevent leakage
-    # between overlapping windows of the same sequence.
     split: train | val | test
 
     # Label quality flags (drive the GOLD / SILVER two-tier split — see docs/PIPELINE.md)
@@ -317,9 +323,7 @@ output_format:
 
 dataset_stats:
   # Working set: 358 sequences with pedestrian annotations + LiDAR on disk.
-  # [PENDING] estimated_total_samples — RECOMPUTE after Step 2/3 (windows materialise + filter),
-  #   then confirm with supervisor. The v0.1 figure (1,300–1,950) was based on a 130-sequence set
-  #   and is stale.
+  # [PENDING] estimated_total_samples — RECOMPUTE after Step 2/3 (windows materialise + filter).
   estimated_total_samples: TBD
 
   # [PENDING] confirm split ratio

@@ -10,7 +10,6 @@ After review (2026-06-18) the project **pivots away from off-the-shelf 3D detect
 1. Drop the old 3D detectors (PointPillars / OpenPCDet). If a 3D model is needed, use a modern one (e.g. SAM4D, 2025).
 2. Keep the 2D+3D combination. Improve the **2D** front-end (e.g. Detectron2), then use ZOD calibration/projection to lift detections to 3D (the **frustum** approach below).
 3. Expect 2D good, 3D weaker; if 3D is inadequate, hand-annotate a few sequences to fine-tune.
-4. Not locked to ZOD — evaluate other datasets if better/easier/better-annotated.
 
 ## Common protocol
 - Same **1,830** keyframe 3D GT boxes (358 pedestrian seqs, 352 evaluated, 6 failed) for all 3D/frustum gates; 2D gate uses **2,159** GT 2D boxes (includes the 296 "2D-only" peds).
@@ -30,7 +29,7 @@ Frustum, uncompensated (kept for reference): recall 0.574 / prec 0.523 / loc med
 / p90 0.703 → compensation cut median −26 %, p90 −27 %.
 
 ## Conclusions
-- **Off-the-shelf PointPillars (either weights) has a severe ZOD domain gap**, worst beyond 40 m where **~52 % (949/1830) of GT lives**. KITTI weights (narrow HDL-64E front-FOV domain) are far worse than nuScenes weights. This is a transfer/domain-gap result.
+- **Off-the-shelf PointPillars has a severe ZOD domain gap**, worst beyond 40 m where **~52 % (949/1830) of GT lives**. KITTI weights (narrow HDL-64E front-FOV domain) are far worse than nuScenes weights. This is a transfer/domain-gap result.
 - **Frustum (2D-driven) beats every off-the-shelf 3D detector** on recall, precision, and range — with zero training — and yields accurate 3D positions (~15 cm median). It is the realisation of the "good 2D → calibration/projection → 3D" direction and is **retained** as the Step 1 measurement front-end.
 - 2D's main limiter is occlusion (single-frame; recoverable by the tracker/linker) and small far peds. Upgrading the 2D detector can directly lift the frustum ceiling.
 
@@ -62,14 +61,12 @@ height / yaw vs GT. 150 sequences, 384 cluster matches.
 Cluster box vs GT: 3D IoU median **0.098** (7 % ≥0.25, 0 % ≥0.5); height error median **−0.81 m**;
 PCA yaw error median **63°**.
 
-**Conclusion — REJECTED.** The cluster ties the slab on the median but has a heavy failure tail
-(mean/p90 blow up): for a sparse/occluded pedestrian the body fails to form a qualifying cluster
+**Conclusion — REJECTED.** The cluster ties the slab on median but has heavy failure tail: for a sparse/occluded pedestrian the body fails to form a qualifying cluster
 while a background blob in the frustum cone does, so "nearest cluster" jumps onto it. The raw cluster box is
 unshippable — sparse points underestimate height by ~0.8 m and a pedestrian's round cross-section
 makes PCA yaw ~random. So **the shipped GOLD box = tracked (slab) centre + keyframe anchor size +
 velocity yaw** (`zodped.labeling.boxes`), and clustering is not in the product. The tail is a
-fixable cluster-*selection* problem (anchor the pick to the slab depth), but even fixed the cluster
-only ties the slab, so it was not worth the complexity. Revisit only for the SILVER tier, which has
+fixable cluster-*selection* problem (anchor the pick to the slab depth), but probably not worth it. Revisit only for the SILVER tier, which has
 no keyframe anchor and will need a size *prior* (measured extent alone is too short).
 
 **Removed (recover from git history):** `src/zodped/labeling/boxfit.py`,
@@ -87,13 +84,6 @@ segmentation (motion, not density; cf. FlowNet3D) — viable only because the tr
 
 ## Step 2 corridor: straight strip → curved swept path (2026-07-01)
 
-**Bug.** `crosses_ego_corridor` was implemented as an *instantaneous straight strip* ahead of the
-ego's heading at each timestamp (ego-frame `forward∈[0,50], |lateral|≤1.5`), aggregated over the
-track — despite the design (PIPELINE.md, schema) specifying the ego **swept path from
-`ego_motion.poses`**. On a straight drive the two agree; through a turn the strip rotates with the
-ego and sweeps an arc across the world, so any *stationary* bystander on the corner falls inside it
-at some instant and is falsely flagged.
-
 **Evidence.** seq 000041 (a 90° junction turn, ego heading −89° over the 8 s window): the straight
 strip flagged **2/2** determined tracks as crossers; both are people standing on the pavement. The
 curved swept path (ped world position projected onto the ego trajectory polyline; in-corridor when
@@ -103,8 +93,7 @@ the foot is `0..50 m` of arc-length ahead and within the half-width) flags **0/2
 corridor crossing count fell **185 → 38** (≈11.5 % → 2.4 % of determined) — the ~147 lost were
 turn/heading artifacts. The 38 survivors are clean: median min-lateral **0.05 m** (all ≤ 1.5 m),
 32/38 with a real detection at `t_c` and a left↔right side change (true traversal). A near-stationary
-ego (`path < 2 m`) yields no swept path → no crossing. `crosses_ego_road` (keyframe polygon) is
-unchanged and kept as the complement. Viz (`viz_render_video.py`) now draws the curved ribbon.
+ego (`path < 2 m`) yields no swept path → no crossing. 
 
 **Open follow-up.** 2.4 % is a small positive class; the broader `ego_road` set is 9.1 %. Confirm
 with supervisor whether the crossing-prediction benchmark uses the strict corridor alone or unions
@@ -112,24 +101,22 @@ in `ego_road` (the union option was considered and deferred).
 
 ## Step 2 corridor BENCHED — crossing action = feet on ego road (2026-07-08)
 
-**Decision (supervisor review).** The crossing ACTION is redefined as *feet on the ego road*
+**Decision** The crossing ACTION is redefined as *feet on the ego road*
 (`crosses_ego_road`), not entry into the ego swept path (`crosses_ego_corridor`). Two consequences:
 
 1. **Corridor is no longer a label.** We only have the `ego_road` polygon at the keyframe (image-
-   pixel, one frame per sequence), so a road-membership test is FOV/range-limited — but that IS the
+   pixel), so a road-membership test is FOV/range-limited — but that IS the
    agreed definition, and a camera model can emit it per-frame without us ever having per-frame road.
-   The corridor's value (metric range-to-crossing, ego-relevance) is real but is a *feature*, not the
-   label, so it moves to Step 4.
+   The corridor's value (metric range-to-crossing, ego-relevance) is real but is a *feature*, not the label.
 2. **Labeling pivots to model consensus.** The per-window crossing-action label (Step 3) moves from
    pure geometry to a local-model consensus labeler (geometry stays as one voter / the GT anchor).
    See `docs/JAAD_PIE_ALIGNMENT.md` and PIPELINE.md.
+   *Correction 2026-07-15: this sentence conflated the two label levels — the consensus labels the
+   track-level ACTION (crossed / not + when), not a per-window label; per-window intent is a
+   separate later step (See PIPELINE.md "Action label source").*
 
-**Change (SHIPPED).** `actions.py` is road-only; the corridor computation is preserved verbatim,
-dormant, in `zodped.labeling.corridor` (pure, deterministic, re-derivable in minutes — benched, not
-deleted, so revival is a function call, not a git revert). `02_label_action.py` and the QC viz drop
-corridor. Re-ran full GOLD: 1,863 tracks, 1,602 determined, **146 `ego_road` crossings (9.11 %)**,
-0 failures — road numbers unchanged from before (only the corridor fields were removed). Record
-schema bumped `action/v0.2 → action/v0.3`.
+**Change (SHIPPED).** `actions.py` is road-only; the corridor computation is preserved in `zodped.labeling.corridor` (benched). `02_label_action.py` and the QC viz drop corridor. Re-ran full GOLD: 1,863 tracks, 1,602 determined, **146 `ego_road` crossings (9.11 %)**,
+0 failures — road numbers unchanged from before (only the corridor fields were removed). Record schema bumped `action/v0.2 → action/v0.3`.
 
 ## Tracker robustness: association in 3D vs 2D-first (2026-07-01, exploratory)
 

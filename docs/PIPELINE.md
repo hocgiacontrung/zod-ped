@@ -4,8 +4,7 @@
 
 ## Pipeline Overview
 
-> **Action ≠ intent.** Two distinct labels live at two levels. The **action** (did this pedestrian cross, and *when*) is a
-> geometric fact about the whole track — Step 2. The **intent** (given a short observation window *before* the event, will they cross within the horizon) is a forward-looking, TTE-anchored per-window label *derived* from the action — Step 3. Labeling each window by what happens *inside* it would collapse intent prediction into action detection and break comparability with JAAD/PIE.
+> **Action ≠ intent.** Two distinct labels live at two levels — never conflate them. The **action** (did this pedestrian cross the road, and *when*) is a verdict about the **whole track** — Step 2: computed geometrically today (feet on the ego road), with **model consensus** as the decided next label source and geometry as its validation anchor (see "Action label source"). The **intent** is **per-window** and a separate later step: v1 is a rough, TTE-anchored label *derived* straight from the action (will t_c fall within the horizon after window_end — Step 3); behavioral intent (pose / attention / social cues — the PIE `intention_prob` sense) is a planned enrichment after that. Labeling each window by what happens *inside* it would collapse intent prediction into action detection and break comparability with JAAD/PIE.
 
 ```
 [pedestrian_sequences.json — sequences with LiDAR on disk]
@@ -26,7 +25,7 @@
         ↓   (Steps 2–4 are same code for GOLD and SILVER tracks)
 [Step 2] Action Labeling  (scripts/02_label_action.py — track-level, geometric ANCHOR)
   - For each FULL track, compute the crossing ACTION (feet on the ego road) + when it happens. Pure geometry over the whole trajectory.
-      * crosses_ego_road : bool — does the track put its feet on the ego_road drivable-surface polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-limited). The JAAD/PIE "crossing the roadway" notion. This is the geometric GROUND-TRUTH ANCHOR the model-based crossing-action labeler (Step 3) is validated against — NOT itself the shipped per-window label.
+      * crosses_ego_road : bool — does the track put its feet on the ego_road drivable-surface polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-limited). The JAAD/PIE "crossing the roadway" notion. This is the geometric GROUND-TRUTH ANCHOR for the model-consensus ACTION labeler (same track-level verdict, decided next label source — see "Action label source"); geometry stays the acting label until that labeler passes its GOLD gate.
       * crossing_frame_timestamp (t_c) — the crossing-onset timestamp (first frame on the road).
   - BENCHED (2026-07-08): the ego-corridor swept-path label (`crosses_ego_corridor` + `ego_distance_at_crossing_m`) was the old primary. The label is now feet-on-road; corridor needs no per-frame road. Its computation is kept dormant in `zodped.labeling.corridor`, re-derivable as a Step-4 aux feature (ego-relevance / metric range-to-crossing). See EXPERIMENTS_LOG.
   - EMPTY / no-real-motion tracks (real_frac=0; the "track" is Kalman coasting from a single anchor) → action = undetermined. 
@@ -40,7 +39,8 @@
       * per-window filters from the TRACKED position at the window midpoint: distance_to_ego_m ≤ 50.0, distance_to_road_m ≤ 15.0; data-availability ≥ min LiDAR scans, camera frame present.
       * per-window geometry: position_ego_rel (relative to ego at window_start) + multimodal frame pointers.
       * ego context at window_start from vehicle_data.hdf5: ego_speed, turn_indicator (as PIE uses them).
-      * intent label per horizon h ∈ {1.0, 1.5, 2.0}s: does the ped cross within [window_end, window_end + h]? (computed from t_c — forward-looking, NOT "crosses inside this window").
+      * intent label per horizon h ∈ {1.0, 1.5, 2.0}s: will the ped start crossing within [window_end, window_end + h]? (forward-looking, NOT "crosses inside this window").
+        v1 ROUGH intent = derived straight from the Step-2 action's t_c (TTE derivation). Behavioral intent labeling (pose / attention / social cues) is its own later step. Model consensus labels the ACTION (Step 2), NOT intent — see "Action label source".
   - Output: data/annotations/{sample_id}.json + data/annotations/dataset_index.parquet.
 
         ↓
@@ -108,13 +108,51 @@ ZOD annotates one keyframe per 20s clip, so a pedestrian present only before/aft
 - **GOLD** — keyframe-anchored peds: verified ZOD identity + 3D box.
 - **SILVER** — detector-found peds: no human verification; flagged `label_confidence_tier=medium`, `is_in_gold_standard=false` (`low` is reserved for a possible future demoted tier).
 
+## Action label source — model-consensus labeler (decided 2026-07-15)
+
+The track-level ACTION verdict (did this pedestrian cross the road, and when) moves from pure
+geometry to the **agreement of three local models**. Geometry (the Step-2 feet-on-road test) is the
+**ground-truth ANCHOR**: consensus is validated against it on GOLD, and disagreement (model↔model or
+model↔anchor) routes a track to manual review. Rationale: the geometric label is FOV/range-limited
+(the `ego_road` polygon exists only at the keyframe camera), while models can judge crossing from
+the video anywhere on the track. This is ACTION labeling — the per-window intent label is a separate
+later step (v1 rough intent derives straight from the action's `t_c`; behavioral intent after that)
+and does NOT use this consensus.
+
+**The three models** — `github.com/lindgrenkalle/pip-thesis` (thesis repo; models compared
+individually there — the consensus/voting layer is OURS to build):
+1. **LSTM-LSTM** encoder-decoder baseline (from `vita-epfl/bounding-box-prediction`).
+2. **LSTM-diffusion** — LSTM encoder + anchor-based truncated-diffusion decoder (DiffusionDrive-style).
+3. **Transformer-diffusion** — HuggingFace ViT encoder + the same diffusion decoder.
+
+Each consumes bbox position+velocity, ego motion, 224×224 image crops over an observation window and
+emits `pred_intent` (crossing logits) + a predicted trajectory (diffusion variants: K samples). The
+trajectory head doubles as a candidate for the Step-4 reference baseline. All inputs are derivable
+from our pipeline (Step-0 2D boxes / projected Step-1 tracks, `ego_motion`/`vehicle_data`, camera
+crops). **[PENDING] adaptation design:** the three are TTE-style *window predictors*, so as ACTION
+labelers they are swept per-window over the full track and their votes aggregated into a track
+verdict + `t_c` (alternative: add a per-frame crossing head); the voting rule and how consensus
+combines with the geometric `t_c` are open — confirm with supervisor.
+
+**Operational facts (checked 2026-07-15):**
+- **No pretrained weights ship** — we train all three on JAAD/PIE first (small models; feasible on
+  the RTX 4080; requires downloading JAAD + PIE).
+- **No LICENSE file** — default all-rights-reserved; contact the author before reusing code wholesale
+  (re-implementing against our own data interface is the fallback).
+- **Domain gap to validate through** (the PointPillars lesson applies): JAAD/PIE are 30 fps,
+  unblurred dashcam; ZOD is 10.1 Hz with anonymisation blur and a 120° lens. The 0.5 s observation
+  window is ~5 ZOD frames vs their default 15 (config-exposed in the repo — retrain with the matched
+  length, don't naively resample). The image/appearance path (ViT, crops) is the most blur-exposed.
+- **GATE before scale:** consensus-vs-anchor agreement on GOLD must pass before the consensus labels
+  anything at scale (thresholds PENDING — see schema `action.method`).
+
 ## Schema, parameters & filters
 
 Full, authoritative field-by-field spec → **`configs/dataset_schema_v0.2.yaml`** (live source of truth; `v0.1` is the frozen supervisor-approved Week-1 snapshot). Summary:
 
 - **Windowing**: 0.5 s observation window, prediction horizons [1.0, 1.5, 2.0] s, TTE-anchored on the Step-2 crossing onset (not a dense stride grid).
 - **Sample unit**: per (pedestrian, window); `sample_id = {seq}_{ped}_{window_start_ms}`. Carries the forward-looking intent label (+ soft label), the per-frame trajectory (world + ego-relative), multimodal file pointers, ego/pedestrian context, and metadata (incl. the GOLD/SILVER tier flags).
-- **Action vs intent**: Step 2 emits the track-level **action** (`crosses_ego_road` + `crossing_frame_timestamp` (`t_c`); EMPTY tracks → `undetermined`) as the geometric ground-truth ANCHOR; Step 3 produces the per-window forward-looking **crossing-action** label — label source under revision, moving from pure geometry to a model-consensus labeler validated against this anchor (see `docs/JAAD_PIE_ALIGNMENT.md`). The two never share a field.
+- **Action vs intent**: Step 2 emits the track-level **action** (`crosses_ego_road` + `crossing_frame_timestamp` (`t_c`); EMPTY tracks → `undetermined`) — **action label source DECIDED (2026-07-15): model consensus**, with the geometric feet-on-road test as the validation anchor (see "Action label source" above). Step 3 derives the per-window forward-looking **rough intent** from that action (`t_c` × horizon); **behavioral intent labeling** (pose / attention / social cues) follows as its own step (see `docs/JAAD_PIE_ALIGNMENT.md` for the surrounding taxonomy debate). The two never share a field.
 - **Filters by stage**: Step 1 selects pedestrians with a 3D keyframe box (`require_3d_annotation`); Step 2 (action) applies **no** filter — it labels every track; Step 3 (assembly) applies the per-window gates from TRACKED positions — proximity (`distance_to_ego ≤ 50 m`, `distance_to_road ≤ 15 m`, at the window midpoint) and data-availability (`min_lidar_frames_in_window`). Proximity is deferred to Step 3 because the single keyframe annotation is a poor proxy for windows up to ~14 m away; a keyframe LiDAR-in-box check is *not* a hard filter (GOLD seeds geometrically).
 - **Output**: one JSON per sample + a Parquet index of all scalar fields (fast filtering).
 - **Scale (target, PENDING)**: ~10–15 windows/seq after filtering across the 358-seq working set; total sample count + crossing ratio to be recomputed after Step 2/3 and confirmed with supervisor.

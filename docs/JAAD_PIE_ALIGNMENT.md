@@ -4,6 +4,12 @@
 > been made. This doc catalogues what JAAD and PIE actually annotate, maps each field onto our
 > pipeline, and frames the open decisions. Treat every "Proposal" below as a candidate to argue
 > about with the supervisor, not a settled design. Schema edits happen only *after* those calls.
+>
+> **Update 2026-07-15:** one adjacent decision IS now settled (in PIPELINE.md / the schema): 
+the **ACTION** (track-level verdict) label source = **model consensus** (3 JAAD/PIE-trained
+> models), geometry = validation anchor. Per-window **intent** stays
+> a separate later step. The taxonomy/naming/benchmark-shape questions below remain open — and §2.4
+> (benchmark-interface alignment) now also bears on how we feed windows into those three models.
 
 ## Why this doc exists
 

@@ -3,20 +3,19 @@
 ACTION is a geometric fact about the WHOLE track: did this pedestrian cross the ego road, and WHEN.
 Computed once per track: pure geometry over the trajectory Step 1 produced.
 
-The crossing ACTION is `crosses_ego_road` — does the track put its feet on the ego_road
-drivable-surface polygon. The polygon is image-pixel and annotated at the KEYFRAME, so each world
+The crossing ACTION is `crosses_ego_road` — does the track put its feet on ego_road
+drivable-surface polygon. The polygon is image-pixel and annotated at KEYFRAME, so each world
 point is projected through the keyframe camera and tested for containment (FOV/range-limited by
-construction). This is the JAAD/PIE "crossing the roadway" notion and, going forward, the geometric
-GROUND-TRUTH ANCHOR against which the model-based crossing-action labeler (Step 3) is validated —
-NOT itself the shipped per-window label.
+construction). This is "crossing the roadway" notion and, going forward, the geometric
+GROUND-TRUTH ANCHOR against which the model-consensus ACTION labeler (same track-level verdict; see
+docs/PIPELINE.md "Action label source") is validated — geometry stays the acting label until that
+labeler passes its GOLD gate. Per-window intent is derived downstream in Step 3.
 
-The ego-corridor swept-path signal that used to be the primary label here is benched — the label is
-now feet-on-road, and the corridor requires no per-frame road. Its computation is preserved, dormant,
-in zodped.labeling.corridor and can be revived as a Step-4 aux feature. See docs/PIPELINE.md.
+The ego-corridor swept-path signal that used to be the primary label here is benched,
+in zodped.labeling.corridor and can be revived as a Step-4 aux feature.
 
 EMPTY tracks (no real detection beyond the anchor; the trajectory is pure Kalman coast) carry no
-usable motion, so their action is `undetermined` — never forced to a crossing decision. They are
-kept and flagged: a verified pedestrian we could not track.
+usable motion, so their action is `undetermined` - kept and flagged: a verified pedestrian we could not track.
 """
 
 from __future__ import annotations
@@ -46,6 +45,18 @@ def _points_in_polygon(points_uv: np.ndarray, polygon: np.ndarray) -> np.ndarray
     return inside & np.isfinite(x)
 
 
+def points_in_any_polygon(points_uv: np.ndarray, polygons: Sequence[np.ndarray]) -> np.ndarray:
+    """Union membership: True where a pixel point lies inside ANY of the given polygons.
+
+    Shared by the Step-2 road test and the Step-3 road-surface extraction, so the two stages
+    agree by construction on what counts as "on the ego road".
+    """
+    inside = np.zeros(len(points_uv), dtype=bool)
+    for poly in polygons:
+        inside |= _points_in_polygon(points_uv, poly)
+    return inside
+
+
 def _road_action(
     frames: Sequence[dict],
     T_world_lidar_keyframe: np.ndarray,
@@ -56,9 +67,7 @@ def _road_action(
     positions = np.array([f["position_world"] for f in frames], dtype=np.float64)
     uv, valid = project_world_to_image(positions, calib, T_world_lidar_keyframe)
 
-    on_road = np.zeros(len(positions), dtype=bool)
-    for poly in polygons:
-        on_road |= _points_in_polygon(uv, poly)
+    on_road = points_in_any_polygon(uv, polygons)
 
     crosses = bool(on_road.any())
     idx = int(np.argmax(on_road)) if crosses else None
