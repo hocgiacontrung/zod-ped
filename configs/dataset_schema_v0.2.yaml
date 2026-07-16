@@ -27,6 +27,8 @@
 #     when); the geometric feet-on-road test is the validation ANCHOR, not final label. INTENT
 #     is per-window and a SEPARATE later step.
 #     Replaced the stale v0.1-era rule/pose/VLM method mix. Action ≠ intent — never conflate.
+#   - 2026-07-16: consensus-committee membership revised (pretrained weights required): PV-LSTM
+#     first + PedGraph+/TAMformer candidates; pip-thesis + PCPA out for now. Still in discussion.
 #   - 2026-07-15 (b): Step 3 IMPLEMENTED (scripts/03_assemble_samples.py, zodped.labeling.samples).
 #     Additions the implementation materialises: sample.anchor_tte_s + sample.window_kind (window
 #     provenance), intent.labels_by_horizon (label per horizon; scalar `label` reads at the
@@ -150,8 +152,7 @@ sample:
 
     # [BENCHED 2026-07-08] The ego-corridor swept-path label (crosses_ego_corridor +
     # ego_distance_at_crossing_m) was the old PRIMARY label. The crossing action is now feet-on-road
-    # (the corridor requires no per-frame road, which we only have at the keyframe). The computation
-    # is preserved, dormant, in zodped.labeling.corridor and can be revived as a Step-4 aux feature
+    # (the corridor requires no per-frame road). The computation is preserved in zodped.labeling.corridor, can be revived as Step-4 aux feature
     # (ego-relevance / metric range-to-crossing). Not emitted by the current pipeline.
     #   crosses_ego_corridor: bool
     #   ego_distance_at_crossing_m: float
@@ -162,9 +163,11 @@ sample:
     status: determined | undetermined
 
     # [CONFIRMED 2026-07-15] NEXT action-label source = MODEL CONSENSUS on the track-level verdict.
-    # Three local models (LSTM-LSTM encoder-decoder baseline,
-    # LSTM-diffusion, transformer-diffusion; trained on JAAD/PIE) judge the track and vote on
-    # crossed / not crossed + when; the geometric feet-on-road test above is the validation ANCHOR,
+    # Three local JAAD/PIE-pretrained models judge the track and vote on crossed / not crossed +
+    # when. Membership revised 2026-07-16 (pretrained weights required; final trio still in
+    # discussion): PV-LSTM (member #1, integrating first) + candidates PedGraph+ and TAMformer;
+    # pip-thesis trio + PCPA out for now — see docs/PIPELINE.md "Action label source".
+    # The geometric feet-on-road test above is the validation ANCHOR,
     # and disagreement (model↔model or model↔anchor) routes the track to manual review.
     # [PENDING] adaptation design — the three are TTE-style window predictors; voting rule; how consensus and geometry combine for t_c; and the GOLD gate
     # (consensus-vs-geometry agreement) that must PASS before consensus labels at scale.
@@ -180,15 +183,13 @@ sample:
     # [CONFIRMED] FORWARD-LOOKING per-window label, a SEPARATE step AFTER action labeling: given the
     # 0.5s observation window, will the pedestrian start crossing (feet on the ego ROAD, see
     # `action`) within the prediction horizon AFTER window_end. This is a PREDICTION, not a
-    # description of motion inside the window — a ped still on the sidewalk during the window is
-    # labelled `crossing` if they step onto the road within the horizon (the whole point of intent
+    # description of motion inside the window (the whole point of intent
     # estimation; matches PCPA/SF-GRU on JAAD/PIE).
     label: crossing | not_crossing | uncertain
 
     # [CONFIRMED] v1 ROUGH intent — inferred straight from the ACTION label (resolves the v0.1
     # TBD): the track's road-crossing onset t_c (action.crossing_frame_timestamp) falls within
-    # [window_end, window_end + horizon]. Evaluated per horizon in prediction_horizons_s. Inherits
-    # t_c's provenance (geometry today; consensus-validated once the action labeler lands).
+    # [window_end, window_end + horizon]. Evaluated per horizon in prediction_horizons_s. Inherits t_c's provenance.
     crossing_definition: t_c ∈ [window_end, window_end + horizon]   # road onset; see `action`
 
     # [CONFIRMED] The per-horizon evaluation above, materialised: one label per horizon. The
@@ -241,9 +242,7 @@ sample:
 
         # The shipped oriented 3D box (Step 1, zodped.labeling.boxes.assemble_track_boxes):
         #   centre = tracked position; size = keyframe anchor extent (rigid per ped);
-        #   yaw = heading of the smoothed velocity. A per-frame LiDAR-cluster box was evaluated and
-        #   rejected (docs/EXPERIMENTS_LOG.md "Boxfit cluster experiment"): cluster size/yaw from
-        #   sparse points are unusable, and the cluster centre is no better than the tracked one.
+        #   yaw = heading of the smoothed velocity. Per-frame LiDAR-cluster box was rejected (docs/EXPERIMENTS_LOG.md "Boxfit cluster experiment").
         box:
           center_world: [x, y, z]  # meters; equals position_world for GOLD
           size_lwh: [l, w, h]      # meters; keyframe anchor extent (constant over the track)
@@ -264,8 +263,7 @@ sample:
 
     # [CONFIRMED] Camera — ~5 frames in observation window.
     # bbox_xyxy = the tracked 3D box projected into this frame (clipped to the image): the
-    # observation input of the JAAD/PIE model family (PV-LSTM / PCPA / pip-thesis), and — unlike
-    # raw Step-0 detections — defined on COASTED frames too. Crops are cut lazily from
+    # observation input of the JAAD/PIE model family, and defined on COASTED frames too. Crops are cut lazily from
     # path+bbox_xyxy by model adapters (no crop convention baked into the dataset).
     camera_frames:
       - timestamp: str
@@ -321,7 +319,8 @@ sample:
     location: str                  # e.g. "quebec", "sweden", "germany"
     collection_date: str           # YYYY-MM-DD
 
-    # [PENDING] Split ratio — assigned at SEQUENCE level (not window level) to prevent leakage
+    # Assigned at SEQUENCE level (not window level) to prevent leakage; the frozen
+    # {seq_id: split} mapping lives at data/processed/splits/sequence_splits.json (Step 4a)
     split: train | val | test
 
     # Label quality flags (drive the GOLD / SILVER two-tier split — see docs/PIPELINE.md)
@@ -362,11 +361,16 @@ dataset_stats:
   # [PENDING] supervisor confirmation + SILVER pour (re-run with --tier all).
   estimated_total_samples: 1087   # GOLD v1; grows with SILVER
 
-  # [PENDING] confirm split ratio
+  # CONFIRMED 70/10/20 (2026-07-16; supersedes the earlier 70/15/15 draft because
+  # crosser positives are scarce and benchmark reliability needs them in test). Assigned by
+  # Step 4a (scripts/04_assign_splits.py): sequence-level stratified deal, frozen at
+  # data/processed/splits/sequence_splits.json. Achieved on GOLD v1: 775/99/213 samples,
+  # crossing ratio @2.0s 0.222/0.232/0.221. Re-deal (--force) is allowed only until the
+  # first result is reported on this split.
   estimated_split:
-    train: "~70%"
-    val:   "~15%"
-    test:  "~15%"
+    train: "70% (achieved 71%)"
+    val:   "10% (achieved 9%)"
+    test:  "20% (achieved 20%)"
 
   # [PENDING] confirm target crossing ratio
   # Real-world urban crossing rate: ~15–30% (ref: JAAD/PIE statistics)

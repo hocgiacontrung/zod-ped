@@ -27,6 +27,7 @@ SEQ_DIR = ROOT / "data" / "raw" / "sequences"
 PED_SEQUENCES = ROOT / "data" / "pedestrian_sequences.json"
 DEFAULT_DET_DIR = ROOT / "data" / "processed" / "detections"       # Step 0 2D-box cache
 DEFAULT_TRAJ_DIR = ROOT / "data" / "processed" / "trajectories"    # Step 1 output (GOLD + SILVER)
+DEFAULT_SPLITS_PATH = ROOT / "data" / "processed" / "splits" / "sequence_splits.json"  # Step 4a frozen mapping
 
 TIERS = ("gold", "silver", "all")
 

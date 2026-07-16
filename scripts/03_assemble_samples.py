@@ -31,7 +31,7 @@ from typing import Dict, List
 
 import pandas as pd
 
-from _common import DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_tier_arg, tier_matches
+from _common import DEFAULT_SPLITS_PATH, DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_tier_arg, tier_matches
 from zodped.labeling.samples import (
     AssemblyConfig,
     SequenceContext,
@@ -56,7 +56,8 @@ def _group_by_sequence(traj_dir: Path) -> Dict[str, List[Path]]:
 
 
 def process_sequence(
-    seq_id: str, traj_paths: List[Path], cfg: AssemblyConfig, args: argparse.Namespace
+    seq_id: str, traj_paths: List[Path], cfg: AssemblyConfig, args: argparse.Namespace,
+    split: str | None = None,
 ) -> tuple[List[dict], Counter]:
     """Assemble and write every sample of one sequence. Returns (samples, skip counts)."""
     skips: Counter = Counter()
@@ -93,6 +94,7 @@ def process_sequence(
         )
         skips.update(track_skips)
         for sample in track_samples:
+            sample["metadata"]["split"] = split   # frozen Step-4a mapping; None pre-Step-4
             (args.out_dir / f"{sample['sample_id']}.json").write_text(json.dumps(sample))
         samples.extend(track_samples)
     return samples, skips
@@ -165,16 +167,24 @@ def main() -> None:
     if args.max_seqs:
         seq_ids = seq_ids[: args.max_seqs]
 
+    # Inherit the frozen Step-4a split mapping when it exists, so re-runs (upgraded labels,
+    # SILVER pour) keep the same test sequences instead of resetting split to None.
+    split_by_seq: Dict[str, str] = {}
+    if DEFAULT_SPLITS_PATH.exists():
+        split_by_seq = json.loads(DEFAULT_SPLITS_PATH.read_text())["assignments"]
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Step 3 (sample assembly): {sum(len(groups[s]) for s in seq_ids)} candidate tracks over "
-          f"{len(seq_ids)} sequences (tier: {args.tier}) → {args.out_dir}")
+          f"{len(seq_ids)} sequences (tier: {args.tier}"
+          f"{', frozen splits' if split_by_seq else ', splits PENDING Step 4a'}) → {args.out_dir}")
 
     all_samples: List[dict] = []
     skips: Counter = Counter()
     failures: List[dict] = []
     for i, seq_id in enumerate(seq_ids):
         try:
-            samples, seq_skips = process_sequence(seq_id, groups[seq_id], cfg, args)
+            samples, seq_skips = process_sequence(seq_id, groups[seq_id], cfg, args,
+                                                  split=split_by_seq.get(seq_id))
             all_samples.extend(samples)
             skips.update(seq_skips)
         except Exception as exc:                 # continue-on-error, like Steps 1-2

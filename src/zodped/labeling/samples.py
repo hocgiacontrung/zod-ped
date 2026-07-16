@@ -515,7 +515,7 @@ def assemble_track_samples(
             "metadata": {
                 "location": ctx.location,
                 "collection_date": ctx.collection_date,
-                "split": None,   # assigned at SEQUENCE level in Step 4 (ratio PENDING)
+                "split": None,   # stamped from the frozen Step-4a sequence mapping by the caller
                 "label_confidence_tier": trajectory.get("label_confidence_tier", "high"),
                 "is_in_gold_standard": trajectory.get("is_in_gold_standard", True),
                 "num_pedestrians_in_scene": num_pedestrians_in_scene,

@@ -59,6 +59,13 @@
   - Manual review queue (scripts/qc_trajectories.py — built): ranked track review + flags.
   - Reference baseline on GOLD = a label SANITY CHECK (are labels learnable / balanced / JAAD-PIE-comparable), QA only — the dataset is the product, not the model.
   - Split assignment at SEQUENCE level (no window leakage between overlapping windows of one seq).
+    DONE 2026-07-16 (Step 4a, scripts/04_assign_splits.py + zodped/dataset/splits.py): stratified
+    greedy deal over all 358 working-set sequences (crosser-window strata; best of 64 seeds),
+    frozen at data/processed/splits/sequence_splits.json — re-deal only via --force, and never
+    after a result has been reported on it. Achieved (GOLD v1, target 70/10/20): 775/99/213
+    samples, crossing ratio @2.0s 0.222/0.232/0.221 (corpus 0.223). Step 3 re-runs inherit the
+    frozen mapping automatically; sequences without samples yet (142) are dealt too, so the
+    SILVER pour inherits splits instead of re-dealing.
 ```
 
 **Sequencing.** Build vertically on GOLD first: prove Steps 2–3 against verified, keyframe-anchored tracks (so a wrong label is a labeling bug, not track noise), 
@@ -130,26 +137,36 @@ the video anywhere on the track. This is ACTION labeling — the per-window inte
 later step (v1 rough intent derives straight from the action's `t_c`; behavioral intent after that)
 and does NOT use this consensus.
 
-**The three models** — `github.com/lindgrenkalle/pip-thesis` (thesis repo; models compared
-individually there — the consensus/voting layer is OURS to build):
-1. **LSTM-LSTM** encoder-decoder baseline (from `vita-epfl/bounding-box-prediction`).
-2. **LSTM-diffusion** — LSTM encoder + anchor-based truncated-diffusion decoder (DiffusionDrive-style).
-3. **Transformer-diffusion** — HuggingFace ViT encoder + the same diffusion decoder.
+**Committee membership (revised 2026-07-16 — pretrained weights required; final trio still in
+discussion).** All three judge from different cues (bbox motion / pose / multi-modal), which is
+what makes the vote informative:
+1. **PV-LSTM** (`vita-epfl/bounding-box-prediction`) — **member #1, integrating first.** Ships a
+   JAAD-trained multitask checkpoint (release v0.1.0; 16-frame in/out @30 fps → future bbox +
+   crossing intention). Inputs: bbox + bbox-velocity sequences ONLY (no images ever). PyTorch.
+2. **PedGraph+** (`RodrigoGantier/Pedestrian_graph_plus`) — candidate #2. Many JAAD/PIE
+   checkpoints in-repo; GCN over 32-frame pose-keypoint windows (±velocity/image/seg branches);
+   PyTorch + Lightning. ZOD adaptation needs a pose-extraction step (e.g. YOLO11-pose on crops).
+3. **TAMformer** (`NadaSOsman/TAMformer`) — candidate #3. Pretrained checkpoints via Google Drive
+   (link in README, contents unverified); multi-modal transformer (bbox+speed+pose+crops) built
+   for EARLY prediction with variable observation lengths (suits the sweep); TF 2.10/Keras with a
+   patched-Keras requirement; ships precomputed JAAD+PIE pose pkls (50+186 MB — reusable beyond
+   TAMformer). Image branch ⇒ frame extraction only if retraining.
 
-Each consumes bbox position+velocity, ego motion, 224×224 image crops over an observation window and
-emits `pred_intent` (crossing logits) + a predicted trajectory (diffusion variants: K samples). The
-trajectory head doubles as a candidate for the Step-4 reference baseline. All inputs are derivable
-from our pipeline (Step-0 2D boxes / projected Step-1 tracks, `ego_motion`/`vehicle_data`, camera
-crops). **[PENDING] adaptation design:** the three are TTE-style *window predictors*, so as ACTION
-labelers they are swept per-window over the full track and their votes aggregated into a track
-verdict + `t_c` (alternative: add a per-frame crossing head); the voting rule and how consensus
-combines with the geometric `t_c` are open — confirm with supervisor.
+Out for now (no shipped weights): the pip-thesis trio, PCPA benchmark models.
 
-**Operational facts (checked 2026-07-15):**
-- **No pretrained weights ship** — we train all three on JAAD/PIE first (small models; feasible on
-  the RTX 4080; requires downloading JAAD + PIE).
-- **No LICENSE file** — default all-rights-reserved; contact the author before reusing code wholesale
-  (re-implementing against our own data interface is the fallback).
+**[PENDING] adaptation design:** these are TTE-style *window predictors*, so as ACTION labelers
+they are swept per-window over the full track and their votes aggregated into a track verdict +
+`t_c` (alternative: add a per-frame crossing head); the voting rule and how consensus combines
+with the geometric `t_c` are open — confirm with supervisor.
+
+**Operational notes (2026-07-16):** JAAD + PIE *behavioral annotations* + data loaders ship on
+GitHub (JAAD lives at `data/external/JAAD` incl. 346 clips, 2.9 GB) — bbox/motion members need
+no video data at all. Disk (56 GB free) forbids frame extraction (169 GB) and PIE videos —
+decode frames on the fly; anything bigger goes to the aalto server. Zero-shot ZOD inference
+first; validate each checkpoint on JAAD's own test split before trusting it on ZOD. NEVER
+fine-tune members on our geometric labels (circular — the committee must stay an independent
+judge); domain-gap fallback = retrain on JAAD at matched window protocol, or fine-tune only on
+manually verified ZOD tracks.
 - **Domain gap to validate through** (the PointPillars lesson applies): JAAD/PIE are 30 fps,
   unblurred dashcam; ZOD is 10.1 Hz with anonymisation blur and a 120° lens. The 0.5 s observation
   window is ~5 ZOD frames vs their default 15 (config-exposed in the repo — retrain with the matched
