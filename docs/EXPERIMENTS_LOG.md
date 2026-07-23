@@ -142,3 +142,47 @@ current (backwards) ordering; the GOLD-appropriate form is anchor-seeded 2D-firs
 crowds are separate problems (measurement noise; ReID). Full anchor-seeded 2D-first A/B on these four
 regimes is pending before committing to a rerun (Step 1 rerun is minutes off the detector cache;
 Step 2 is tier-agnostic and regenerates in minutes).
+
+## Committee gate v1: zero-shot PV-LSTM on ZOD GOLD — FAILED (2026-07-16)
+
+**Setup.** Released JAAD-trained PV-LSTM ckpt (validated on JAAD same day: intention AUC 0.77,
+trajectory head at published ballpark — formatting proven). Swept over all 1,863 GOLD tracks on a
+virtual 30 Hz timeline (RTS track sampled + 3D box projected per tick; ZOD px ×0.5 ≈ JAAD scale;
+16-frame windows, stride 5). Track verdict vs Step-2 geometric anchor, threshold calibrated on the
+frozen train split. `scripts/02b_committee_gate.py` → `reports/committee_gate_pvlstm.json`.
+
+**Result: no usable zero-shot signal.** Track-score AUC vs anchor 0.55/0.53/0.60 (train/val/test;
+was 0.77 on JAAD). Event-locked profile FLAT-to-inverted: crosser windows average 0.063–0.087
+p(cross) approaching t_c vs 0.085 for non-crossers — the score does not rise before real crossings.
+Not an aggregation artifact (max / mean / top-5 / p90 all AUC 0.42–0.56).
+
+**Mechanism evidence.** Window score anti-correlates with box height (r=−0.22; 120px+ boxes —
+77% crosser windows — mean score 0.039 vs 0.099 for <30px). The ckpt scores low on exactly the
+big near-range boxes where ZOD crossings live. Points at input-distribution mismatch beyond lens
+geometry alone: projected-3D boxes (looser, FOV-clipped) vs JAAD's tight detector boxes, fisheye
+lateral geometry, ZOD image-velocity regime.
+
+**Consequences.** Geometry remains the acting Step-2 label (as gated). Next iterations, cheapest
+first: (a) feed Step-0 DETECTOR boxes (observed frames) instead of projected-3D boxes — closest
+match to JAAD's box statistics; (b) undistort via Kannala→virtual-pinhole reprojection before
+boxing; (c) parallel evidence from PedGraph+ (pose cue transfers differently); (d) retrain on JAAD
+at matched 10 Hz/5-frame protocol (plan-B, doesn't fix geometry mismatch by itself). Gate harness
+itself is DONE and cheap (~7 min full GOLD sweep) — iterate through it.
+
+### Gate iteration (a): detector boxes — box style ACQUITTED (2026-07-16)
+
+Same gate, windows built from matched Step-0 YOLO boxes (per-frame match: project track point,
+pick containing detection; lerp 10 Hz→30 Hz, bridge ≤0.35 s; `--boxes detector`,
+`reports/committee_gate_pvlstm_detector.json`). Detector boxes ARE visibly different (e.g. width
+19 px vs projected 39 px on the same ped) and the score SCALE responds (max-F1 threshold 0.343 vs
+0.101), but ranking does not: test AUC 0.587 vs 0.597, event-locked profile still flat-to-inverted
+(0.084 at −3 s → 0.060 at t_c vs 0.085 non-crosser baseline). Also checked: track score vs ego
+speed corr −0.05 — ego-motion streaming is NOT the confound. Cost: 423 mostly-far/occluded tracks
+lose all windows to detector gaps (1,440 scored vs 1,863).
+
+**Updated suspect list:** box style and ego-motion regime acquitted; remaining: (1) fisheye
+lateral geometry, (2) POPULATION/LABEL-SEMANTICS mismatch — JAAD's cue is curbside near-range
+"will step off the curb"; our anchor includes crossings far ahead and tracks already on the road —
+the learned signature may not exist in our windows at all. Next probes ranked by information:
+PedGraph+ second judge (different cue family; if pose ALSO fails ⇒ population mismatch, not model
+choice), fisheye undistortion (half-day, lens-only), matched-protocol retrain (supervisor fork).

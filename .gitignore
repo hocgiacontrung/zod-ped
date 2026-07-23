@@ -5,6 +5,9 @@ data/annotations/
 data/external/
 data/splits/*.parquet
 
+# Third-party model repos + downloaded checkpoints (committee members)
+third_party/
+
 # Outputs
 outputs/
 *.log

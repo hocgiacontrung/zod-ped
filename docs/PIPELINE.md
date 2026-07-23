@@ -140,9 +140,18 @@ and does NOT use this consensus.
 **Committee membership (revised 2026-07-16 — pretrained weights required; final trio still in
 discussion).** All three judge from different cues (bbox motion / pose / multi-modal), which is
 what makes the vote informative:
-1. **PV-LSTM** (`vita-epfl/bounding-box-prediction`) — **member #1, integrating first.** Ships a
-   JAAD-trained multitask checkpoint (release v0.1.0; 16-frame in/out @30 fps → future bbox +
-   crossing intention). Inputs: bbox + bbox-velocity sequences ONLY (no images ever). PyTorch.
+1. **PV-LSTM** (`vita-epfl/bounding-box-prediction`) — **member #1, VALIDATED on JAAD 2026-07-16**
+   (`scripts/bringup_committee_pvlstm_jaad.py` → `reports/committee_pvlstm_jaad_eval.json`).
+   Ships a JAAD-trained multitask checkpoint (release v0.1.0; 16-frame in/out @30 fps → future
+   bbox + crossing intention). Inputs: bbox + bbox-velocity sequences ONLY (no images ever;
+   bbox format = [center_x, center_y, w, h] pixels). PyTorch; clone + weights live at
+   `third_party/bounding-box-prediction` (gitignored). JAAD test (their own windowing, 415
+   windows, 6.3% crossers): trajectory head ADE 15.2px / FDE 28px / AIOU 0.72 / FIOU 0.56
+   (published ballpark — input formatting proven); intention head **must be consumed as a
+   SCORER** — p(cross) at last future frame, AUC 0.77 — because the released ckpt is
+   conservative (p ≤ 0.42 ⇒ their 0.5-argmax output is degenerate, recall 0). Threshold
+   calibrated on val (max-F1 → 0.285): test acc 0.91 / F1 0.37 at 6% base rate. The committee
+   harness must take calibrated scores, not argmax verdicts, from every member.
 2. **PedGraph+** (`RodrigoGantier/Pedestrian_graph_plus`) — candidate #2. Many JAAD/PIE
    checkpoints in-repo; GCN over 32-frame pose-keypoint windows (±velocity/image/seg branches);
    PyTorch + Lightning. ZOD adaptation needs a pose-extraction step (e.g. YOLO11-pose on crops).
@@ -173,6 +182,10 @@ manually verified ZOD tracks.
   length, don't naively resample). The image/appearance path (ViT, crops) is the most blur-exposed.
 - **GATE before scale:** consensus-vs-anchor agreement on GOLD must pass before the consensus labels
   anything at scale (thresholds PENDING — see schema `action.method`).
+- **Gate v1 (zero-shot PV-LSTM) RAN 2026-07-16 — FAILED**: AUC 0.55 vs anchor (0.77 on JAAD), flat
+  event-locked profile; input-distribution mismatch, not threshold-fixable. Geometry stays the
+  acting label; harness is cheap (~7 min full GOLD) — iterate detector-boxes / undistortion /
+  PedGraph+ / matched retrain through it. Evidence → `docs/EXPERIMENTS_LOG.md` "Committee gate v1".
 
 ## Schema, parameters & filters
 

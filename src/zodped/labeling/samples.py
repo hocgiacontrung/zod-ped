@@ -359,7 +359,7 @@ def _trajectory_block(timeline: TrackTimeline, w: WindowSpec, cfg: AssemblyConfi
     return {"frames": frames}
 
 
-def _project_box_xyxy(
+def project_box_xyxy(
     ctx: SequenceContext, timeline: TrackTimeline, t: float
 ) -> Tuple[Optional[List[float]], int]:
     """The tracked 3D box at time t, projected to an image xyxy bbox (clipped to the frame).
@@ -404,7 +404,7 @@ def _multimodal_block(
 ) -> dict:
     camera_frames = []
     for ts, rel_path in cams:
-        bbox, n_vis = _project_box_xyxy(ctx, timeline, ts)
+        bbox, n_vis = project_box_xyxy(ctx, timeline, ts)
         camera_frames.append({
             "timestamp": _iso(ts),
             "path": rel_path,
