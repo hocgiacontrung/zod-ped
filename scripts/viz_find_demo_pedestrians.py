@@ -73,7 +73,7 @@ def _summarize(doc: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR)
-    add_tier_arg(ap, default="gold")
+    add_tier_arg(ap, default="all")
     ap.add_argument("--top", type=int, default=20, help="how many candidates to print")
     ap.add_argument("--min-gap", type=int, default=2, help="min bridged-coast run (frames)")
     ap.add_argument("--min-obs", type=float, default=0.6, help="min observed_fraction")

@@ -186,3 +186,88 @@ lateral geometry, (2) POPULATION/LABEL-SEMANTICS mismatch — JAAD's cue is curb
 the learned signature may not exist in our windows at all. Next probes ranked by information:
 PedGraph+ second judge (different cue family; if pose ALSO fails ⇒ population mismatch, not model
 choice), fisheye undistortion (half-day, lens-only), matched-protocol retrain (supervisor fork).
+
+## Manual anchor batch: geometry vs human crossing labels (2026-07-27)
+
+First human-labeled anchor over the frozen 20-sequence curated batch
+(`data/processed/review/curation_worksheet.csv`, 87 tracks). Human crossing labels follow JAAD
+"crossing the roadway" semantics (see `docs/JAAD_PIE_ALIGNMENT.md` §5). Compared against the Step-2
+geometric `crosses_ego_road` label on the **35 GOLD kept tracks** (SILVER has no action records —
+Step 2 ran GOLD-only). This is the reciprocal of the committee gate: instead of "does a model match
+geometry," it asks "does geometry match a human."
+
+**Agreement.** Confusion (human, machine): no/no 19, yes/yes 6, no/yes 6, yes/no 4.
+- Agreement 25/35 = **71%**.
+- Machine crossing **precision ~50%** (6 real of 12 called crossing), **recall ~60%** (6 of 10 human
+  crossers caught).
+- Crossing rate among kept, decided tracks: 11 yes / 41 no = **21%** (inside the JAAD/PIE band).
+
+**Fails in both directions — the key result.**
+- **6 false positives.** Four sequences tagged `crosser` (000940, 001084, 000035, 000067) contained
+  *no* human-confirmed crossing at all. Geometry invented them.
+- **4 false negatives.** Sequences 000952 and 000953, tagged `negative`, each held two real crossers
+  geometry never saw.
+
+**Root causes (two, partly separable).**
+1. **FOV / range limit of the keyframe polygon.** `ego_road` exists only at the keyframe camera, so
+   crossings far ahead or outside its view are invisible — the 952/953 misses. (Same limitation cited
+   in PIPELINE.md "Action label source" as the reason for the model-consensus move.) Frustum depth
+   smear is the likely FP mechanism: a sidewalk walker's lifted feet land on the road polygon.
+2. **Road-extent / "lane" definition mismatch (annotator testimony).** A substantial share of the
+   disagreement is *definitional*, not perceptual: geometry sometimes counts only the ego's own
+   carriageway (not the opposing-direction lanes), and treats a separated bike lane inconsistently
+   with the human. So yes/no and onset timing diverge on where "the road" begins, independent of
+   whether the ped was seen clearly. **This part is fixable by redefining the `ego_road` polygon
+   extent (opposing lanes in/out; explicit bike-lane policy) — separate from, and cheaper than, the
+   committee.** It will also shift the crossing rate.
+
+**t_c comparison: deferred.** Human onset values recorded (range −5.5 s to +6.3 s rel. keyframe, plus
+`pre_obs` for already-crossing at first sight). Machine t_c extraction bugged in this pass (action
+record keyframe key) — redo before quoting onset error.
+
+**SILVER precision.** SILVER fate: 20 keep / 11 merge / 20 drop of 51 → only **39% survive as their
+own new pedestrian**. GOLD survives 35/36. Cyclists and people-inside-cars (YOLO `person` FPs) are a
+**SILVER-only** contaminant — GOLD is anchored on verified keyframe boxes, so they cannot enter it.
+Implication for the pour: a cheap pre-filter (drop detections whose box lies inside a vehicle box;
+drop cyclist overlaps) raises SILVER precision before QC and cuts manual load.
+
+**Consequences.**
+- Geometry is unfit as the *final* Step-2 label (~30% wrong vs human, both directions) — confirms the
+  gate-v1 conclusion from the label side. It stays the acting label only.
+- Do the road-extent redefinition (cause #2) before attributing more of the gap to the model — a
+  chunk of the "committee vs geometry" disagreement may be this same definitional issue, not model
+  skill. This double-attests the committee gate's "POPULATION/LABEL-SEMANTICS mismatch" suspect.
+- Anchor positives are thin (11). Grow to ~30–50 hand-confirmed crossers — but NOT by seeding from
+  the machine's `crosser` tag (4 of 8 crosser-tagged seqs held no real crossing).
+
+### Human-anchor gate: PV-LSTM vs the curated labels (2026-07-27)
+
+`scripts/02c_committee_gate_human.py` — same PV-LSTM scorer + window machinery as 02b, but truth =
+the HUMAN `crossed_yes_no` in the curation worksheet (25 seqs: original 20 + 5 grow), BOTH tiers,
+kept tracks only. AUC is the headline (pooled; ~20 positives is too few for a held-out split, and
+AUC needs no threshold). Motivation: 02b's model-vs-geometry gate conflates model error with
+geometry's ~30% error — checking against the human removes that.
+
+**Result (83 kept+labeled tracks, 21 crossers / 62 non):**
+| box source | n | crossers | AUC vs HUMAN | mean score cross/non |
+|------------|----|----------|--------------|----------------------|
+| projected3d | 83 | 21 | **0.678** | 0.227 / 0.164 |
+| detector    | 77 | 20 | **0.736** | 0.228 / 0.148 |
+
+Reference: PV-LSTM on JAAD's own test 0.77; the old ZOD model-vs-geometry gate 0.55.
+
+**Two earlier conclusions corrected — both were artifacts of grading against geometry, not truth:**
+1. **PV-LSTM is NOT near-random on ZOD.** Against the human it ranks a real crosser above a
+   non-crosser ~68-74% of the time (0.55 → 0.68/0.74). Most of the "committee gate v1 FAILED"
+   signal was geometry being wrong, not the model.
+2. **Detector boxes DO help.** 02b found detector≈projected vs geometry (0.587 vs 0.597); against
+   the human, detector boxes are clearly better (0.736 vs 0.678) — they match JAAD's box statistics,
+   and that only shows up once the truth is correct. (Cost: 6 short tracks yield no detector window.)
+
+Geometry-vs-human on the shared gold tracks reproduces the anchor batch: ~0.72-0.74 agreement.
+
+**Honest caveat:** ~20 crossers, pooled, optimistic (same-set) threshold → the AUC is a rough,
+encouraging read with a wide error bar, NOT a validated pass. Direction is trustworthy (consistent
+across both box types, clean mean-score separation); the absolute number is not precise. Next levers
+unchanged (undistortion, PedGraph second judge, matched retrain), but detector boxes are now the
+default input for PV-LSTM.

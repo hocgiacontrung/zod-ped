@@ -6,21 +6,19 @@
 > about with the supervisor, not a settled design. Schema edits happen only *after* those calls.
 >
 > **Update 2026-07-15:** one adjacent decision IS now settled (in PIPELINE.md / the schema): 
-the **ACTION** (track-level verdict) label source = **model consensus** (3 JAAD/PIE-trained
-> models), geometry = validation anchor. Per-window **intent** stays
+the **ACTION** (track-level verdict) label source = **model consensus** (JAAD/PIE-trained
+> models), validated against **human curated labels** (geometry retired as the yardstick 2026-07-27,
+> ~30% wrong vs a human — §5). Per-window **intent** stays
 > a separate later step. The taxonomy/naming/benchmark-shape questions below remain open — and §2.4
 > (benchmark-interface alignment) now also bears on how we feed windows into those three models.
 
 ## Why this doc exists
 
-JAAD and PIE are the two established camera-only pedestrian-intent datasets. They encode years of
-labeling decisions we'd otherwise rediscover the hard way. Our novelty is the extra modalities
-(camera + LiDAR + radar) and auto-labeling at scale — but the *label taxonomy* is a solved problem
-worth borrowing, both for quality and for direct benchmark comparability. This doc is the reference
-for that borrowing.
-
-Source of truth for the specs below: the JAAD and PIE annotation repos/pages (verified 2026-07-02),
-not memory. See "Sources".
+JAAD and PIE are the two established camera-only pedestrian-intent datasets — years of labeling
+decisions we'd otherwise rediscover the hard way. Our novelty is the extra modalities (camera +
+LiDAR + radar) and auto-labeling at scale, but the *label taxonomy* is a solved problem worth
+borrowing, for quality and benchmark comparability. This doc is that reference; specs below come
+from the JAAD/PIE repos/pages (verified 2026-07-02), not memory (see "Sources").
 
 ---
 
@@ -178,6 +176,27 @@ comparability. Cheap, pure upside.
 Nothing above is implemented. Revisit `configs/dataset_schema_v0.2.yaml` only once these are settled.
 
 ---
+
+## 5. Manual curation labeling rules (edge cases) — operational
+
+These are the acting rules for the human anchor pass over the curated batch
+(`data/processed/review/curation_worksheet.csv`), added 2026-07-27. They resolve the recurring
+edge cases against the JAAD/PIE `crossing` scheme in §1 / §3 (`1` cross / `0` not / `−1` irrelevant).
+Do keep/drop/merge **first**; label crossing only on the tracks that survive (a dropped or merged
+fragment carries no crossing — its crossing lives with the primary it folds into).
+
+| case | verdict | `crossed_yes_no` | `crossing_start` | why (JAAD/PIE mapping) |
+|------|---------|------------------|------------------|------------------------|
+| **Too far / too small to tell** | keep or drop | `undetermined` | — | JAAD `crossing = −1` (irrelevant / not observable). Never force a `no` — that poisons the negative class with peds we never actually saw. Most fail the Step-3 50 m ego gate anyway. |
+| **Cyclist** (or scooter/wheelchair — not a walking pedestrian) | `drop`, note `cyclist` | — | — | JAAD annotates pedestrians only; cyclists get no crossing behavior. YOLO's `person` class swept it into SILVER. Exclude to match JAAD. |
+| **Already mid-crossing at first sight** (e.g. we join the scene as the ego turns) | keep | `yes` | `pre-obs` (+ flag no-onset) | Action = they crossed. But onset happened off-camera, so there is no `t_c` to predict → JAAD/PIE drop already-crossing windows from the prediction set. The `pre-obs`/no-onset flag keeps it out of the positive **intent** windows in Step 3. |
+
+**`crossing_start` convention.** Use the **same clock as the video overlay**: signed seconds relative
+to the **keyframe** (`0` = keyframe), which is exactly how the overlay computes `t_c`
+(`crossing_onset − keyframe`). So a ped stepping onto the road half a second before the keyframe is
+`−0.5`; 3.5 s after is `+3.5`. This makes "human − machine" the direct t_c error. You do **not** need
+frame precision — the overlay flashes a red border at the machine's onset frame; write `matches` when
+it lands right, and only give your own signed-seconds value when it's clearly early/late/wrong.
 
 ## Sources (verified 2026-07-02)
 - JAAD dataset repo — https://github.com/ykotseruba/JAAD

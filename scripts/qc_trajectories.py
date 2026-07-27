@@ -1,8 +1,8 @@
 """Step 1 QC — score trajectories (per tier) and rank a manual-review queue.
 
 GOLD and SILVER tracks share the trajectories dir, so the population is chosen EXPLICITLY with
-`--tier {gold,silver,all}` (default gold — the historical baseline numbers). SILVER QC is
-`--tier silver`.
+`--tier {gold,silver,all}` (default all — GOLD+SILVER together for review). GOLD-only baseline
+numbers = `--tier gold`; SILVER QC alone = `--tier silver`.
 
 Turns the qualitative "watch the demo video" pass into a scalable, quantitative gate. Reads the
 per-pedestrian trajectory JSONs (data/processed/trajectories/) plus the Step 1 run report (for each
@@ -107,7 +107,9 @@ def score_track(doc: dict, n_pool_frames: Optional[int]) -> dict:
     longest_coast, n_coast_runs = _coast_runs(observed)
     return {
         "seq": doc["sequence_id"],
-        "ped": doc["pedestrian_id"][:8],
+        # SILVER ids ("silver000", ...) collide under [:8] ("silver00"); keep them whole so the
+        # per-track table stays uniquely keyed. GOLD uuids stay truncated for width.
+        "ped": doc["pedestrian_id"] if doc["pedestrian_id"].startswith("silver") else doc["pedestrian_id"][:8],
         "tier": tier_of(doc),
         "occlusion": doc.get("anchor", {}).get("occlusion", "?"),
         "n_frames": n_frames,
@@ -269,7 +271,7 @@ def main() -> None:
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR)
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="Step 1 run report (for span_fraction)")
     ap.add_argument("--seq", default=None, help="restrict to one sequence id, e.g. 000007")
-    add_tier_arg(ap, default="gold")
+    add_tier_arg(ap, default="all")
     ap.add_argument("--top", type=int, default=30, help="how many worst tracks to print")
     ap.add_argument("--csv", type=Path, default=None, help="optional path to write the full per-track table")
     ap.add_argument("--min-duration", type=float, default=3.0, help="flag SHORT below this tracked duration (s)")

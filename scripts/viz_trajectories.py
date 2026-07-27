@@ -62,7 +62,7 @@ def main() -> None:
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR, help="per-ped trajectory JSONs")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_REVIEW_DIR, help="where BEV review PNGs are written")
     ap.add_argument("--seq", default=None, help="render only this sequence id (default: all)")
-    add_tier_arg(ap, default="gold")
+    add_tier_arg(ap, default="all")
     ap.add_argument("--jump-warn", type=float, default=1.5, help="max_step (m) above which a track is flagged")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)

@@ -82,7 +82,10 @@ def load_ped_tracks(traj_dir: Path, seq: str, ped_filter: Optional[str], tier: s
             continue
         frames = doc["frames"]
         tracks.append({
-            "id": pid[:8],
+            # SILVER ids ("silver000", "silver001", ...) collide under [:8] ("silver00"),
+            # which would merge their label AND their palette colour — keep them whole so each
+            # track is uniquely named/coloured for manual review; GOLD uuids stay truncated.
+            "id": pid if pid.startswith("silver") else pid[:8],
             "full_id": pid,
             "ts": np.array([parse_zod_ts(fr["timestamp"]) for fr in frames]),
             "pos": np.array([fr["box"]["center_world"] for fr in frames]),
@@ -404,7 +407,7 @@ def main() -> None:
     ap.add_argument("--layout", choices=["split", "camera"], default="split",
                     help="split = camera|3D side-by-side (default); camera = full camera frame only")
     ap.add_argument("--ped", default=None, help="render only this pedestrian (uuid prefix)")
-    add_tier_arg(ap, default="gold")
+    add_tier_arg(ap, default="all")
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR)
     ap.add_argument("--out", type=Path, default=None, help="output mp4 (default: review/{zod|cam}_{seq}.mp4)")
     ap.add_argument("--window", type=float, default=8.0, help="seconds centred on the keyframe")
