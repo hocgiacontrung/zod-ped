@@ -27,6 +27,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from zodped.labeling.pose_cache import best_pose_for_box
+from zodped.labeling.pose_estimator import PersonPose
 from zodped.labeling.samples import TrackTimeline, project_box_xyxy
 from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration, project_world_to_image
@@ -189,6 +191,96 @@ def build_track_windows_from_detections(
             w = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
             boxes[i] = ((1 - w) * m_boxes[r - 1] + w * m_boxes[r]) * cfg.scale
     return _cut_windows(ticks, boxes, cfg)
+
+
+# --- PedGraph+ member: pose-keypoint windows ---------------------------------------------------
+#
+# PedGraph+ (committee member #2) is a GCN over a 19-node skeleton, not a box sequence. Its released
+# 2D checkpoint (weigths/jaad-23-h2d) takes (B, C=3, T, V=19) with C = [x/w, y/h, joint_conf] and a
+# 3-class head (0=not-cross, 1=cross, 2=irrelevant). The graph adjacency is LEARNED per node index,
+# so node ORDER must match the checkpoint's training layout.
+#
+# Our detector yields 17 COCO joints; PedGraph uses 19 = COCO-17 + neck + mid-hip (the standard
+# ST-GCN pedestrian augmentation). The exact slot order of those 19 is NOT published in the repo (the
+# training keypoints ship as opaque pickles), so this mapping is the conventional COCO-then-derived
+# order and is UNVALIDATED until the JAAD reference gate reproduces the paper's AUC (~0.77). Treat any
+# ZOD number produced before that check as provisional.
+NUM_PEDGRAPH_NODES = 19
+_L_SHO, _R_SHO, _L_HIP, _R_HIP = 5, 6, 11, 12  # COCO indices used to synthesise the two extra joints
+
+
+def coco17_to_pedgraph19(kp17: np.ndarray) -> np.ndarray:
+    """Map a (17, 3) COCO skeleton [x, y, conf] to PedGraph's (19, 3) layout.
+
+    Slots 0-16 are the COCO joints unchanged; slot 17 is the neck (mid-shoulder) and slot 18 the
+    mid-hip, each synthesised as the midpoint of its two parents with confidence = min(parents) so a
+    derived joint is only as trustworthy as its weakest source. See the UNVALIDATED-order caveat above.
+    """
+    neck = (kp17[_L_SHO] + kp17[_R_SHO]) / 2.0
+    neck[2] = min(kp17[_L_SHO, 2], kp17[_R_SHO, 2])
+    mid_hip = (kp17[_L_HIP] + kp17[_R_HIP]) / 2.0
+    mid_hip[2] = min(kp17[_L_HIP, 2], kp17[_R_HIP, 2])
+    return np.vstack([kp17, neck, mid_hip])
+
+
+@dataclass
+class PoseWindows:
+    """All scoreable pose windows of one track: normalised 19-node skeletons per camera frame."""
+
+    t_ends: np.ndarray   # (N,) unix seconds — end of each observation window
+    poses: np.ndarray    # (N, obs_len, 19, 3): [x/w, y/h, joint_conf], normalised image coords
+    n_frames: int        # matched camera frames the track spans (windows possible before cutting)
+
+
+def build_pose_windows(
+    timeline: TrackTimeline,
+    ctx: ProjectionContext,
+    pose_frames: List[tuple],
+    obs_len: int = 16,
+    stride: int = 3,
+    min_iou: float = 0.2,
+) -> PoseWindows:
+    """Cut PedGraph observation windows from cached per-frame skeletons.
+
+    For each camera frame inside the track's span, the tracked 3D box is projected into the image and
+    `best_pose_for_box` picks the skeleton that overlaps it — grounding a free-floating pose to THIS
+    pedestrian. Frames with no projected box or no matching skeleton break the run (a miss is never
+    fabricated), then windows of `obs_len` consecutive matched frames are cut at `stride`.
+
+    `pose_frames`: [(unix_ts, [PersonPose, ...])], sorted by time. PedGraph's adaptive pooling makes
+    it frame-rate agnostic, so windows are cut on the native ~10 Hz camera frames directly — no
+    virtual-timeline resampling (which would interpolate keypoints, i.e. fabricate a skeleton).
+    """
+    img_w, img_h = ctx.calib["FC"]["image_dimensions"]
+    ts_list: List[float] = []
+    kp_list: List[Optional[np.ndarray]] = []
+    for t, poses in pose_frames:
+        if not (timeline.t0 <= t <= timeline.t1):
+            continue
+        ts_list.append(t)
+        xyxy, _ = project_box_xyxy(ctx, timeline, float(t))
+        match = best_pose_for_box(poses, np.asarray(xyxy), min_iou) if xyxy is not None else None
+        if match is None:
+            kp_list.append(None)
+            continue
+        kp19 = coco17_to_pedgraph19(match.keypoints).astype(np.float64)
+        kp19[:, 0] /= img_w
+        kp19[:, 1] /= img_h
+        kp_list.append(kp19)
+
+    t_ends: List[float] = []
+    windows: List[np.ndarray] = []
+    for end in range(obs_len - 1, len(ts_list), stride):
+        start = end - obs_len + 1
+        chunk = kp_list[start:end + 1]
+        if all(k is not None for k in chunk):
+            t_ends.append(ts_list[end])
+            windows.append(np.stack(chunk))
+    return PoseWindows(
+        t_ends=np.array(t_ends),
+        poses=np.array(windows) if windows else np.empty((0, obs_len, NUM_PEDGRAPH_NODES, 3)),
+        n_frames=len(ts_list),
+    )
 
 
 @dataclass
