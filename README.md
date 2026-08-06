@@ -9,8 +9,9 @@ A multimodal pedestrian intent and trajectory prediction dataset built on top of
 intent datasets (JAAD, PIE, PSI) which are camera-only, this dataset includes
 synchronized **camera + LiDAR + radar** data across 14 European countries.
 
-**Status:** GOLD tier built and human-verified; SILVER pour pending (Week 8).
-Current step-by-step state → `CLAUDE.md`.
+**Status:** both tiers built — 4,449 samples over 4,285 pedestrians, GOLD human-verified,
+splits frozen, reference baseline passing (Week 8). Current numbers:
+`python scripts/dataset_stats.py`. Step-by-step state → `CLAUDE.md`.
 
 ## Dataset Foundation
 

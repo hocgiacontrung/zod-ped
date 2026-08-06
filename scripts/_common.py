@@ -81,3 +81,30 @@ def tier_of(doc: dict) -> str:
 def tier_matches(doc: dict, tier: str) -> bool:
     """Whether a doc belongs to the requested tier selection."""
     return tier == "all" or tier_of(doc) == tier
+
+
+DEFAULT_CUT_PATH = ROOT / "data" / "processed" / "review" / "silver_cut.json"
+DEFAULT_STITCH_PATH = ROOT / "data" / "processed" / "review" / "stitch_proposals_final.json"
+
+
+def add_stitch_args(ap: argparse.ArgumentParser) -> None:
+    """`--stitch` — resolve trajectory FILES into PEDESTRIANS before labeling them.
+
+    Step 1 writes one file per track, but the linker fragments a pedestrian it loses for longer than
+    `max_consecutive_misses`, so several SILVER files can be one walker. With --stitch, Steps 2 and 3
+    apply the free cut and fold fragments into their primary in memory (see
+    zodped.labeling.stitching.resolve_sequence_tracks). Off by default: GOLD needs neither, and the
+    manifests are SILVER artifacts.
+    """
+    ap.add_argument("--stitch", action="store_true",
+                    help="apply the SILVER free cut + finalized stitch map (label pedestrians, not fragments)")
+    ap.add_argument("--cut-path", type=Path, default=DEFAULT_CUT_PATH)
+    ap.add_argument("--stitch-path", type=Path, default=DEFAULT_STITCH_PATH)
+
+
+def stitch_inputs(args: argparse.Namespace):
+    """(cut, groups_by_seq) for resolve_sequence_tracks — empty when --stitch is off."""
+    from zodped.labeling.stitching import load_cut, load_groups
+    if not getattr(args, "stitch", False):
+        return set(), {}
+    return load_cut(args.cut_path), load_groups(args.stitch_path)

@@ -117,16 +117,24 @@ human it is wrong on roughly a quarter of the crossings it declares, in both dir
 
 - **GOLD** — a human reviewed essentially every geometry-declared crosser. GOLD's labels are
   **human** (`02e_merge_human_labels.py`, precedence human > geometry). The question is closed there.
-- **SILVER** — nobody will watch ~9,400 tracks, so labels come from a **committee**: geometry +
-  PV-LSTM, auto-accept where they agree, human review where they don't. Neither judge is good enough
-  alone; their agreement is much better than either (evidence → EXPERIMENTS_LOG).
+- **SILVER** — nobody will watch ~9,400 tracks, so SILVER keeps **geometry** labels and ships as
+  *weak-labeled training bulk*: flagged `is_in_gold_standard=false`, `pv_disputed` retained as a
+  counted quantity, and the measured GOLD error rate (28% false-positive on declared crossings)
+  documented as expected label noise. **Never an evaluation set** — GOLD is the eval set.
 
-**Committee members.** PV-LSTM (`vita-epfl/bounding-box-prediction`) is member #1 — JAAD-trained,
-consumes bbox + bbox-velocity sequences only. Its intention head **must be used as a SCORER**
-(p(cross)), never as an argmax verdict: the released checkpoint is conservative and its 0.5 threshold
-is degenerate. That is the general rule — the committee takes calibrated scores from every member.
-PedGraph+ was evaluated as member #2 and **benched** (pose-only ceiling below PV-LSTM). TAMformer
-remains an unexplored candidate.
+**The model committee was tried and dropped (2026-08-06).** The plan was geometry + PV-LSTM,
+auto-accepting where they agree. Zero-shot, PV-LSTM scores AUC **0.52** on the 217 human-verified
+tracks — a coin flip on exactly the boundary cases a tie-breaker exists to arbitrate. Retrained on
+ZOD it ranks far better (0.76), but **ranking is not labeling**: it declares crossings at 0.29
+precision against geometry's 0.72, so relabeling with it would make SILVER worse. Dropped on both
+counts. Evidence → EXPERIMENTS_LOG.
+
+PV-LSTM (`vita-epfl/bounding-box-prediction`) remains useful for what it demonstrably does: **RANKING
+which tracks a human should watch**, which is how the crosser review package was built. Two lessons
+worth keeping: its intention head must be consumed as a SCORER (the released checkpoint is
+conservative, so its 0.5 argmax is degenerate), and a model's AUC on a broad sample can be carried
+almost entirely by easy negatives — always measure on the slice where the decision is actually hard.
+PedGraph+ was evaluated and benched; TAMformer was never explored.
 
 **Never fine-tune a member on our geometric labels** — that is circular, and the committee only has
 value as an independent judge. Fine-tuning on *human-verified* tracks is legitimate, but must respect

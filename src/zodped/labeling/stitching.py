@@ -18,15 +18,17 @@ Surviving pairs are chained greedily (each track keeps its single cheapest succe
 Each group is one pedestrian; the PRIMARY id is a GOLD member if present (most observed frames wins),
 else the longest SILVER fragment. Every other member is a fragment that should merge into the primary.
 
-Applying the merge (concatenating frames, re-smoothing, re-running Steps 2-4) is a separate step; on
-the curated batch the human confirms each proposal first.
+Applying a finalized proposal set is `resolve_sequence_tracks` at the bottom of this module: it cuts
+junk, folds fragments into their primary IN MEMORY, and hands Steps 2-3 one doc per pedestrian. No
+trajectory file is ever rewritten, so Step 1's output stays the reproducible source.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -176,3 +178,106 @@ def stitch_from_dir(traj_dir: Path, seq_id: str, p: StitchParams) -> List[dict]:
             continue
         docs.append(json.loads(f.read_text()))
     return stitch_sequence(docs, p)
+
+
+# ---------------------------------------------------------------------------
+# Applying a finalized proposal set: cut + merge, in memory
+# ---------------------------------------------------------------------------
+
+def load_cut(path: Path) -> Set[Tuple[str, str]]:
+    """(seq, ped) keys the SILVER free cut removed as junk. Empty set if the manifest is absent."""
+    if not path.exists():
+        return set()
+    return {(x["seq"], x["ped"]) for x in json.loads(path.read_text())["dropped"]}
+
+
+def load_groups(path: Path) -> Dict[str, List[dict]]:
+    """Finalized stitch proposals, indexed by sequence. Empty dict if the manifest is absent."""
+    if not path.exists():
+        return {}
+    groups: Dict[str, List[dict]] = {}
+    for g in json.loads(path.read_text())["groups"]:
+        groups.setdefault(g["seq_id"], []).append(g)
+    return groups
+
+
+def merge_docs(primary: dict, fragments: List[dict]) -> dict:
+    """Fold `fragments` into `primary`, returning ONE trajectory doc for the whole pedestrian.
+
+    The merged doc keeps the primary's identity and tier — the fragments are the same person, so
+    nothing about *who* this is changes. Frames are unioned and re-sorted by timestamp; where two
+    fragments claim the same instant the OBSERVED frame wins over a coasted one (a coast is the
+    linker's guess, a detection is a measurement), and ties break on more LiDAR support.
+
+    The gap between fragments is left as a genuine hole rather than interpolated: Step 2 tests each
+    frame independently, and Step 3 measures `observed_fraction` per window, so an invented bridge
+    would inflate both. `stats` is recomputed; `config` gains a `stitched_from` provenance list.
+    """
+    if not fragments:
+        return primary
+
+    best: Dict[str, dict] = {}
+    for frame in [f for doc in [primary, *fragments] for f in doc["frames"]]:
+        key = frame["timestamp"]
+        rank = (bool(frame.get("in_observation")), frame.get("num_lidar_points") or 0)
+        if key not in best or rank > (bool(best[key].get("in_observation")),
+                                      best[key].get("num_lidar_points") or 0):
+            best[key] = frame
+
+    frames = sorted(best.values(), key=lambda f: f["timestamp"])
+    observed = sum(bool(f.get("in_observation")) for f in frames)
+    merged = dict(primary)
+    merged["frames"] = frames
+    merged["stats"] = {"n_frames": len(frames), "n_observed": observed,
+                       "n_coasted": len(frames) - observed,
+                       "observed_fraction": round(observed / len(frames), 4) if frames else 0.0}
+    merged["config"] = {**primary.get("config", {}),
+                        "stitched_from": [d["pedestrian_id"] for d in fragments]}
+    return merged
+
+
+def resolve_sequence_tracks(paths: List[Path], groups: List[dict],
+                            cut: Set[Tuple[str, str]]) -> List[Tuple[str, dict]]:
+    """One sequence's trajectory files -> the PEDESTRIANS they represent, cut and stitched.
+
+    Returns (output_filename, doc) pairs so a caller writes one record per pedestrian under the
+    primary's name. Three things happen, in order:
+
+      1. cut       — junk tracks are dropped outright, and never merged into anything.
+      2. GOLD-primary groups — the SILVER fragments are dropped, NOT folded in. They belong to a
+         pedestrian that is already tracked, labeled and human-verified under its GOLD identity;
+         rewriting that track here would silently invalidate the verified label keyed to it.
+         Healing GOLD with SILVER fragments is a separate, deliberate decision.
+      3. SILVER-primary groups — fragments are folded into the primary (merge_docs).
+
+    With no manifests this is just "load every file", so callers can pass empty inputs safely.
+    """
+    docs = {}
+    for path in paths:
+        seq, ped = path.name.split("_", 1)[0], path.name.split("_", 1)[1][:-5]
+        if (seq, ped) in cut:
+            continue
+        docs[ped] = (path.name, json.loads(path.read_text()))
+
+    absorbed: Set[str] = set()
+    merged_out: List[Tuple[str, dict]] = []
+    for g in groups:
+        primary_id = g["primary_id"]
+        # A GOLD member is NEVER absorbed, whatever the proposal says. Each GOLD track is anchored on
+        # its own verified ZOD keyframe box and its human label is keyed to its id, so folding one
+        # away would silently delete an annotated pedestrian. A GOLD-GOLD proposal is therefore a
+        # false merge (or two ZOD annotations of one person) — either way, not ours to resolve here.
+        absorbable = [m for m in g["member_ids"]
+                      if m != primary_id and m in docs and not docs[m][1].get("is_in_gold_standard", True)]
+        if g["primary_is_gold"]:
+            absorbed.update(absorbable)          # silver fragments of a gold ped: dropped, not folded
+            continue
+        if primary_id not in docs:               # the cut removed the primary; fragments stand alone
+            continue
+        name, primary = docs[primary_id]
+        merged_out.append((name, merge_docs(primary, [docs[m][1] for m in absorbable])))
+        absorbed.update(absorbable)
+        absorbed.add(primary_id)
+
+    singles = [v for k, v in docs.items() if k not in absorbed]
+    return singles + merged_out

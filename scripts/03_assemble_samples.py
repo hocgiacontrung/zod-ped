@@ -31,7 +31,9 @@ from typing import Dict, List
 
 import pandas as pd
 
-from _common import DEFAULT_SPLITS_PATH, DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_tier_arg, tier_matches
+from _common import (DEFAULT_SPLITS_PATH, DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_stitch_args,
+                     add_tier_arg, stitch_inputs, tier_matches)
+from zodped.labeling.stitching import resolve_sequence_tracks
 from zodped.labeling.samples import (
     AssemblyConfig,
     SequenceContext,
@@ -57,7 +59,7 @@ def _group_by_sequence(traj_dir: Path) -> Dict[str, List[Path]]:
 
 def process_sequence(
     seq_id: str, traj_paths: List[Path], cfg: AssemblyConfig, args: argparse.Namespace,
-    split: str | None = None,
+    split: str | None = None, groups: List[dict] | None = None, cut: set | None = None,
 ) -> tuple[List[dict], Counter]:
     """Assemble and write every sample of one sequence. Returns (samples, skip counts)."""
     skips: Counter = Counter()
@@ -65,13 +67,12 @@ def process_sequence(
     # Load the tier's tracks + their Step-2 action records first (cheap), so a sequence whose
     # tracks are all skippable still pays for context setup only once it has work to do.
     tracks: List[tuple[dict, dict]] = []
-    for path in traj_paths:
-        trajectory = json.loads(path.read_text())
+    for name, trajectory in resolve_sequence_tracks(traj_paths, groups or [], cut or set()):
         if not tier_matches(trajectory, args.tier):
             continue
-        action_path = args.actions_dir / path.name
+        action_path = args.actions_dir / name
         if not action_path.exists():
-            skips["no_action_record"] += 1       # Step 2 has not labeled this track yet
+            skips["no_action_record"] += 1       # Step 2 has not labeled this pedestrian yet
             continue
         tracks.append((trajectory, json.loads(action_path.read_text())))
     if not tracks:
@@ -158,9 +159,11 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="per-sample JSONs + Parquet index")
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="run report")
     add_tier_arg(ap, default="gold")
+    add_stitch_args(ap)
     ap.add_argument("--max-seqs", type=int, default=None, help="cap sequences (smoke test)")
     args = ap.parse_args()
     cfg = AssemblyConfig()   # schema v0.2 CONFIRMED values; change the schema first, then here
+    cut, stitch_groups = stitch_inputs(args)
 
     groups = _group_by_sequence(args.traj_dir)
     seq_ids = sorted(groups)
@@ -176,6 +179,7 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Step 3 (sample assembly): {sum(len(groups[s]) for s in seq_ids)} candidate tracks over "
           f"{len(seq_ids)} sequences (tier: {args.tier}"
+          f"{', cut+stitched' if args.stitch else ''}"
           f"{', frozen splits' if split_by_seq else ', splits PENDING Step 4a'}) → {args.out_dir}")
 
     all_samples: List[dict] = []
@@ -184,7 +188,8 @@ def main() -> None:
     for i, seq_id in enumerate(seq_ids):
         try:
             samples, seq_skips = process_sequence(seq_id, groups[seq_id], cfg, args,
-                                                  split=split_by_seq.get(seq_id))
+                                                  split=split_by_seq.get(seq_id),
+                                                  groups=stitch_groups.get(seq_id, []), cut=cut)
             all_samples.extend(samples)
             skips.update(seq_skips)
         except Exception as exc:                 # continue-on-error, like Steps 1-2
@@ -198,6 +203,11 @@ def main() -> None:
     summary = _summarise(all_samples, cfg)
     report = {
         "tier": args.tier,
+        "stitched": bool(args.stitch),
+        # `num_pedestrians_in_scene` and `is_key_pedestrian` are derived from the tracks THIS RUN
+        # loaded, so they depend on --tier: a gold-only run sees only gold neighbours. The shipped
+        # values come from the full --tier all pass, which is the accurate scene population.
+        "scene_context_population": args.tier,
         "config": cfg.as_dict(),
         "n_sequences": len(seq_ids),
         "summary": summary,

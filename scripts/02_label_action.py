@@ -29,9 +29,11 @@ from typing import Dict, List
 
 import numpy as np
 
-from _common import DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_tier_arg, tier_matches
+from _common import (DEFAULT_TRAJ_DIR, ROOT, SEQ_DIR, add_stitch_args, add_tier_arg,
+                     stitch_inputs, tier_matches)
 from zodped.dataset.keyframe import parse_zod_ts
 from zodped.labeling.actions import label_track_action, load_ego_road_polygons
+from zodped.labeling.stitching import resolve_sequence_tracks
 from zodped.utils.ego_motion import get_T_world_lidar, load_ego_motion
 from zodped.utils.projection import load_calibration
 DEFAULT_OUT_DIR = ROOT / "data" / "processed" / "actions"
@@ -48,8 +50,9 @@ def _group_by_sequence(traj_dir: Path) -> Dict[str, List[Path]]:
     return groups
 
 
-def process_sequence(seq_id: str, traj_paths: List[Path], args: argparse.Namespace) -> List[dict]:
-    """Label every track in one sequence; write a JSON per pedestrian. Returns the action records."""
+def process_sequence(seq_id: str, traj_paths: List[Path], args: argparse.Namespace,
+                     groups: List[dict], cut: set) -> List[dict]:
+    """Label every pedestrian in one sequence; write a JSON each. Returns the action records."""
     seq_dir = SEQ_DIR / seq_id
     em = load_ego_motion(seq_dir / "ego_motion.json")
     calib = load_calibration(seq_dir / "calibration.json")
@@ -61,12 +64,11 @@ def process_sequence(seq_id: str, traj_paths: List[Path], args: argparse.Namespa
     polygons = load_ego_road_polygons(json.loads(road_path.read_text())) if road_path.exists() else None
 
     records: List[dict] = []
-    for path in traj_paths:
-        trajectory = json.loads(path.read_text())
+    for name, trajectory in resolve_sequence_tracks(traj_paths, groups, cut):
         if not tier_matches(trajectory, args.tier):
             continue
         record = label_track_action(trajectory, calib, polygons, T_world_lidar_kf)
-        (args.out_dir / path.name).write_text(json.dumps(record))
+        (args.out_dir / name).write_text(json.dumps(record))
         records.append(record)
     return records
 
@@ -90,9 +92,11 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="per-track action JSONs")
     ap.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="run report (out of the data dir)")
     add_tier_arg(ap, default="gold")
+    add_stitch_args(ap)
     ap.add_argument("--max-seqs", type=int, default=None, help="cap sequences (smoke test)")
     args = ap.parse_args()
 
+    cut, stitch_groups = stitch_inputs(args)
     groups = _group_by_sequence(args.traj_dir)
     seq_ids = sorted(groups)
     if args.max_seqs:
@@ -100,13 +104,15 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Step 2 (action labeling): {sum(len(groups[s]) for s in seq_ids)} candidate tracks over "
-          f"{len(seq_ids)} sequences (tier: {args.tier}) → {args.out_dir}")
+          f"{len(seq_ids)} sequences (tier: {args.tier}"
+          f"{', cut+stitched' if args.stitch else ''}) → {args.out_dir}")
 
     all_records: List[dict] = []
     failures: List[dict] = []
     for i, seq_id in enumerate(seq_ids):
         try:
-            all_records.extend(process_sequence(seq_id, groups[seq_id], args))
+            all_records.extend(process_sequence(seq_id, groups[seq_id], args,
+                                                stitch_groups.get(seq_id, []), cut))
         except Exception as exc:                 # continue-on-error, like Step 1
             failures.append({"seq_id": seq_id, "reason": repr(exc)[:200]})
         if (i + 1) % 25 == 0:
@@ -115,6 +121,7 @@ def main() -> None:
     summary = _summarise(all_records)
     report = {
         "tier": args.tier,
+        "stitched": bool(args.stitch),
         "n_sequences": len(seq_ids),
         "summary": summary,
         "failures": failures,

@@ -52,7 +52,11 @@ PVLSTM_REPO = ROOT / "third_party" / "bounding-box-prediction"
 DEFAULT_CKPT = PVLSTM_REPO / "weights" / "multitask_pv_lstm_trained.pkl"
 DEFAULT_WORKSHEET = ROOT / "data" / "processed" / "review" / "curation_worksheet.csv"
 DEFAULT_ACTIONS_DIR = ROOT / "data" / "processed" / "actions"
+DEFAULT_VERIFIED_DIR = ROOT / "data" / "processed" / "actions_verified"
 KEEP_VERDICTS = {"", "keep", "fix"}
+# The SHIPPED PV decision threshold (max-F1 from the 2026-07-27 human gate, 77 tracks). Reported
+# alongside this run's own max-F1 so drift between the two is visible rather than assumed away.
+SHIPPED_PV_THRESHOLD = 0.170
 
 
 def load_pvlstm_scorer(ckpt: Path, cfg: SweepConfig, device: str,
@@ -101,6 +105,25 @@ def load_human_labels(worksheet: Path) -> dict:
         labels[(r["seq"].zfill(6), r["pedestrian_id"])] = {
             "y": int(crossed == "yes"), "tier": r["tier"], "note": (r["notes"] or "").strip(),
         }
+    return labels
+
+
+def load_verified_labels(verified_dir: Path) -> dict:
+    """Human labels from Step-2e `actions_verified/` — the same shape as the worksheet loader.
+
+    Larger and more crosser-rich than the worksheet (217 reviewed tracks vs 77), and it is the label
+    the dataset actually ships, so it is the truth the committee should be judged against once it
+    exists. GOLD only: SILVER has no verified records by design.
+    """
+    labels = {}
+    for path in sorted(verified_dir.glob("*.json")):
+        record = json.loads(path.read_text())
+        human = record.get("human_review")
+        if not human or human.get("crosses_ego_road") is None:   # unreviewed, or human was unsure
+            continue
+        seq, ped = path.name.split("_", 1)[0], path.name.split("_", 1)[1][:-5]
+        labels[(seq, ped)] = {"y": int(bool(human["crosses_ego_road"])), "tier": "gold",
+                              "note": (human.get("notes") or "").strip()}
     return labels
 
 
@@ -154,6 +177,32 @@ def score_curated(args, cfg: SweepConfig, scorer, labels: dict) -> tuple[list, d
     return rows, skips
 
 
+def agreement_rule(rows: list, threshold: float) -> dict:
+    """The SHIP RULE measured: when geometry and PV-LSTM agree, how often are they right?
+
+    The committee auto-accepts a label wherever its two judges concur and sends the rest to a human,
+    so what matters is not either judge's solo accuracy but the accuracy of their agreement — and how
+    much of the corpus that agreement covers. Only tracks with BOTH signals can be counted.
+    """
+    tri = [r for r in rows if r["anchor_crosses"] is not None]
+    if not tri:
+        return {"n": 0}
+    geo = np.array([bool(r["anchor_crosses"]) for r in tri])
+    pv = np.array([r["track_score"] >= threshold for r in tri])
+    y = np.array([bool(r["y_human"]) for r in tri])
+    agree = geo == pv
+    return {
+        "threshold": round(threshold, 3),
+        "n": len(tri),
+        "agree": int(agree.sum()),
+        "agree_coverage": round(float(agree.mean()), 4),
+        "agree_accuracy": round(float((geo[agree] == y[agree]).mean()), 4) if agree.any() else None,
+        "disagree": int((~agree).sum()),
+        "geometry_alone_accuracy": round(float((geo == y).mean()), 4),
+        "pv_alone_accuracy": round(float((pv == y).mean()), 4),
+    }
+
+
 def metrics(rows: list) -> dict:
     """Pooled AUC (headline) + optimistic-threshold F1/p/r + geometry-vs-human on shared golds."""
     y = np.array([r["y_human"] for r in rows])
@@ -177,12 +226,18 @@ def metrics(rows: list) -> dict:
             "agreement": round(float(np.mean([r["anchor_crosses"] == bool(r["y_human"])
                                               for r in tri])), 4) if tri else None,
         },
+        "agreement_rule_at_shipped_threshold": agreement_rule(rows, SHIPPED_PV_THRESHOLD),
+        "agreement_rule_at_this_runs_threshold": agreement_rule(rows, thr),
     }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--truth", choices=("worksheet", "verified"), default="worksheet",
+                    help="human labels from the curation worksheet, or from Step-2e actions_verified "
+                         "(bigger + crosser-richer, GOLD only)")
     ap.add_argument("--worksheet", type=Path, default=DEFAULT_WORKSHEET)
+    ap.add_argument("--verified-dir", type=Path, default=DEFAULT_VERIFIED_DIR)
     ap.add_argument("--traj-dir", type=Path, default=DEFAULT_TRAJ_DIR)
     ap.add_argument("--actions-dir", type=Path, default=DEFAULT_ACTIONS_DIR)
     ap.add_argument("--ckpt", type=Path, default=DEFAULT_CKPT)
@@ -198,14 +253,18 @@ def main() -> None:
 
     cfg = SweepConfig(stride=args.stride)
     scorer = load_pvlstm_scorer(args.ckpt, cfg, args.device)
-    labels = load_human_labels(args.worksheet)
-    print(f"human-anchor gate: {len(labels)} kept+labeled tracks (tier {args.tier}, boxes {args.boxes})")
+    labels = (load_verified_labels(args.verified_dir) if args.truth == "verified"
+              else load_human_labels(args.worksheet))
+    print(f"human-anchor gate: {len(labels)} labeled tracks from {args.truth} "
+          f"(tier {args.tier}, boxes {args.boxes})")
 
     rows, skips = score_curated(args, cfg, scorer, labels)
     m = metrics(rows)
     report = {"member": "pvlstm", "checkpoint": str(args.ckpt.relative_to(ROOT)),
               "box_source": args.boxes, "tier": args.tier, "sweep": cfg.as_dict(),
-              "truth": "human curation_worksheet crossed_yes_no", "skips": skips, "metrics": m,
+              "truth": ("human verdicts in actions_verified/ (Step 2e)" if args.truth == "verified"
+                        else "human curation_worksheet crossed_yes_no"),
+              "skips": skips, "metrics": m,
               "caveat": "merges are propose-only; crossers whose crossing lived in a merged silver "
                         "fragment are scored on their incomplete gold track",
               "tracks": rows}
@@ -217,6 +276,12 @@ def main() -> None:
     print(f"  mean score crosser/non  : {m['mean_score_crosser']} / {m['mean_score_non']}")
     print(f"  optimistic thr {m['optimistic_threshold']}: F1 {m['optimistic_f1']} "
           f"p {m['optimistic_precision']} r {m['optimistic_recall']}")
+    for key in ("agreement_rule_at_shipped_threshold", "agreement_rule_at_this_runs_threshold"):
+        a = m[key]
+        if a.get("n"):
+            print(f"  ship rule @thr {a['threshold']}: agree on {a['agree']}/{a['n']} "
+                  f"({a['agree_coverage']:.0%}), accurate {a['agree_accuracy']:.0%} when they agree "
+                  f"| solo: geometry {a['geometry_alone_accuracy']:.0%} / PV {a['pv_alone_accuracy']:.0%}")
     g = m["geometric_vs_human_on_shared"]
     print(f"  (geometry vs human on shared {g['n']} gold tracks: agree {g['agreement']})")
     print(f"  report → {args.report_path}")

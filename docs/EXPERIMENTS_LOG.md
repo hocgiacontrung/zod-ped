@@ -306,7 +306,182 @@ Two quality signals moved the right way, so this is not merely "fewer labels":
 0.173 corpus — the Step-4a stratification survived a labeling change it never saw, which is exactly
 what freezing at sequence level was supposed to buy.
 
-**Levers if the ratio must come back up** (none of them relabeling): relax the 50m `distance_to_ego`
-gate for crosser windows (458 windows lost there, still the biggest single cut); pour SILVER (~4× the
-pedestrians); chase geometry's misses — the 40-row probe already found 15 crossers in the geometry=no
-bucket, so more exist in the slice nobody sampled.
+**Levers if the ratio must come back up:** only one survives measurement — chase geometry's misses
+(the 40-row probe already found 15 crossers in the geometry=no bucket, so more exist in the slice
+nobody sampled). **Not** the ego gate (a class-balance filter — see below) and **not** SILVER (it
+dilutes to 2.6% — see the pour).
+
+### The 50m ego gate is a class-balance filter — do NOT relax it (2026-08-06)
+
+`distance_to_ego` cuts 458 windows, the biggest single filter, so relaxing it looked like the obvious
+way to recover positives. Swept it (GOLD, verified labels, everything else held):
+
+| max_distance_to_ego_m | crossers @2.0s | non-crossers | ratio @2.0s |
+|---|---:|---:|---|
+| **50 (current)** | 180 | 863 | **0.1726** |
+| 75 | 186 | 1,104 | 0.1442 |
+| 100 | 192 | 1,202 | 0.1377 |
+| unlimited | 192 | 1,230 | 0.1350 |
+
+**Removing it adds 12 crossers and 367 non-crossers** — the admitted region is ~3% crossing-dense
+against the corpus's 17%, so the ratio falls by a fifth and the target band gets *further* away.
+
+The mechanism is obvious in hindsight: crossing the ego road requires being near the ego road, and
+the ego is on that road. Pedestrians beyond 50m are overwhelmingly non-crossers, or their crossing is
+not observable from here. So the gate is not merely a range filter — it removes far-away negatives
+faster than far-away positives, and that is most of what keeps the ratio where it is.
+
+**Keep 50m.** If the band must be met, the honest levers are more positives (SILVER, geometry's
+misses), not a wider window on the negatives.
+
+
+---
+
+## Committee re-measured on the 217 verified tracks — PV-LSTM does NOT hold up (2026-08-06)
+
+The agreement rule that was going to label all of SILVER was justified by **77** tracks with ~20
+crossers. Step 2e produced **217** human-verified tracks with 119 crossers, so the rule was
+re-measured against them (`02b_committee_gate.py --truth verified --tier gold`, a new truth source on
+the existing gate rather than a new script).
+
+| | worksheet (77 tracks, 20 crossers) | verified (210 scored, 119 crossers) |
+|---|---|---|
+| PV-LSTM AUC vs human | **0.736** | **0.522** |
+| mean score crosser / non | 0.228 / 0.148 | 0.237 / 0.232 |
+| ship rule coverage (agree) | 61% | 44% |
+| ship rule accuracy when agreeing | **91%** | **82%** |
+| geometry alone | 81% | 75% |
+| PV-LSTM alone | 70% | 53% |
+
+**Not a code regression.** Re-running the old truth through the same code reproduces 0.736 / 61% /
+91% exactly. The difference is entirely the population.
+
+**Why the populations differ, and why the second one is the one that matters.** The worksheet batch
+was a broad curated sample (26% crossers). The verified set is deliberately concentrated on the
+decision boundary — every geometry-declared crosser plus a high-PV probe of the geometry=no bucket —
+so it is 57% crossers and contains almost no easy far-away negatives. PV-LSTM's apparent 0.74 came
+substantially from ranking easy irrelevant tracks below crossers. **On the hard cases where geometry
+is actually uncertain, it scores 0.52 — a coin flip, with crosser and non-crosser mean scores
+0.237 vs 0.232.** That is precisely the slice a tie-breaker exists to arbitrate.
+
+Both samples are selected, so neither number is "PV-LSTM's true AUC on ZOD". But the decision only
+depends on the boundary slice, and there the model adds nothing: the agreement rule buys 82% accuracy
+on 44% of tracks, against geometry's 75% on 100% of them.
+
+**Decision: do not ship the geometry+PV-LSTM committee for SILVER.** PV-LSTM stays useful for what it
+demonstrably did — RANKING which tracks a human should watch, which is how the crosser review package
+was built — and nothing more.
+
+> **Follow-up (2026-08-06, same day): training does NOT overturn this.** The 0.52 above is a
+> JAAD-trained checkpoint judged zero-shot, and retraining on ZOD lifts ranking to AUC 0.76 (see
+> "Step 4b reference baseline"). But labeling needs precision at a threshold, not ranking: the
+> trained model declares crossings at **0.29 precision** (0.46 at its best operating point) against
+> **geometry's 0.72**. Relabeling with it would make SILVER's labels worse. The decision stands, now
+> on stronger evidence.
+
+**SILVER cannot currently be validated at all.** The 30 kept SILVER tracks carrying a human crossing
+label are 28 no/no, with one geometry crosser and one human crosser that are different tracks. There
+is effectively **one positive**, so that set can measure nothing about crossing accuracy.
+
+**Consequence for the pour.** SILVER ships as *weak-labeled training bulk*: geometry labels, the
+`pv_disputed` flag retained as a counted quantity, `is_in_gold_standard=false`, and the measured GOLD
+error rate (28% false-positive on declared crossings) documented as the expected label noise. It must
+never be used as an evaluation set — GOLD is the eval set, and GOLD is human-verified. This is what
+the two-tier design was for; the committee was an attempt to do better than that, and it did not earn
+its place.
+
+**If SILVER labels must improve later**, the only honest basis is a *crosser-enriched random* sample
+of SILVER labeled by a human — not more model votes, and not the current 30-track set.
+
+
+---
+
+## SILVER poured through Steps 2–3 (2026-08-06)
+
+The cut + stitch manifests were manifests only — nothing honored them. Steps 2 and 3 now take
+`--stitch`, which applies the free cut and folds fragments into their primary **in memory**
+(`zodped.labeling.stitching.resolve_sequence_tracks`); no trajectory file is rewritten, so Step 1's
+output stays the reproducible source. Measured first: keeping only the primary instead of merging
+would have lost 12 of ~219 SILVER crossings and ~1,400 fragments' worth of frames, in the tier whose
+whole purpose is volume — so merging is worth the loader.
+
+**Resolution:** 11,257 track files → **9,247 pedestrians** (1,863 GOLD + 7,384 SILVER). 664 cut as
+junk, ~1,346 fragments folded. 2,010 now-stale per-fragment action records removed so
+`actions/` holds exactly one record per pedestrian.
+
+**GOLD is never absorbed.** A first version of the loader dropped any non-primary member of a
+gold-primary group, which silently deleted 2 GOLD pedestrians belonging to **GOLD–GOLD** stitch
+proposals. Each GOLD track is anchored on its own verified ZOD keyframe box and its human label is
+keyed to its id, so a GOLD member is now never absorbed whatever the proposal says. (Both such
+proposals are almost certainly false merges; resolving them is a separate question.) No SILVER-primary
+group contains a GOLD member, so the fix did not change any SILVER output.
+
+**Result — and the finding that matters:**
+
+| | samples | pedestrians | crossers @2.0s | ratio @2.0s |
+|---|---:|---:|---:|---|
+| GOLD | 1,043 | 929 | 180 | **0.173** |
+| SILVER | 3,406 | 3,356 | 90 | **0.026** |
+| combined | 4,449 | 4,285 | 270 | 0.061 |
+
+**SILVER's crossing rate is 6.6× lower than GOLD's**, and it dilutes the corpus ratio from 17.3% to
+6.1%. That is not a bug — it is what SILVER *is*. GOLD pedestrians were annotated by ZOD because a
+human judged them relevant, and relevant overwhelmingly means near the ego road. SILVER pedestrians
+are whatever the detector found: far, peripheral, on the pavement. Step 2 already showed it at track
+level (SILVER 3.0% crossing vs GOLD 9.1%).
+
+**Consequence: do not quote a combined crossing ratio.** It describes neither tier. GOLD is the
+evaluation set at 17.3%; SILVER is training bulk at 2.6%, ~3.3× GOLD's sample volume for half its
+positives. The index carries `is_in_gold_standard` and `label_confidence_tier` on every row, so the
+two are always separable — report them separately.
+
+**Known wart: scene context is tier-dependent.** `num_pedestrians_in_scene` and `is_key_pedestrian`
+are derived from the tracks a run loaded, so a `--tier gold` run sees only GOLD neighbours (e.g. 9)
+where the full pass sees the real population (37). Pouring SILVER changed those two fields on 1,027
+of the 1,043 GOLD samples, and flipped `is_key_pedestrian` on 118 — **no label, count, or ratio moved**.
+The shipped values are from the `--tier all` pass and are the accurate ones. Making the field
+population-independent (always compute scene context over every track, whatever --tier processes) is
+a small fix worth doing before anyone re-runs a single tier and gets different metadata.
+
+
+---
+
+## Step 4b reference baseline: PV-LSTM TRAINED on our data (2026-08-06)
+
+`scripts/04b_train_baseline.py` — the PV-LSTM position+velocity architecture retrained at OUR
+protocol (5-frame windows at ~10 Hz, not 16 at 30 Hz). Train on the frozen train split, select on
+GOLD val, evaluate on **GOLD test only** (199 windows, 35 crossers) whatever the model trained on.
+5 seeds per arm.
+
+| arm | train windows | crossers | GOLD test AUC | AP |
+|---|---:|---:|---|---|
+| GOLD only | 740 | 127 | 0.763 ± 0.025 | 0.375 ± 0.029 |
+| GOLD + SILVER | 3,071 | 186 | **0.800 ± 0.034** | 0.387 ± 0.064 |
+| chance | | | 0.500 | 0.176 |
+
+**Training fixes what zero-shot could not — the supervisor's hypothesis was correct.** The released
+JAAD checkpoint scored **0.52** on our verified tracks; the same architecture trained on ZOD scores
+**0.76–0.80**. So the earlier failure was a domain-gap result about a checkpoint, NOT a verdict on
+the model or on our labels. AP is more than double chance (0.39 vs 0.18), so the labels carry real,
+learnable signal — the Step-4b sanity check passes.
+
+**Headline: the GOLD-only arm, AUC 0.763 ± 0.025.** It trains purely on human-verified labels, so it
+is the number to quote; the SILVER arm is the ablation, not the result.
+
+**Does SILVER earn its place? Not proven — but it does not poison.** Paired by seed, the SILVER arm
+wins 3/5 with a mean gain of +0.036 AUC, and the per-seed deltas swing both ways (−0.012 to +0.114).
+The seed spread measures initialisation only; with 35 test positives the sampling error is larger
+still. So: **the "weak labels will poison the model" worry is answered — neither arm collapsed** — but
+"SILVER improves the baseline" is not established by this evidence. Settling it needs a bigger
+verified test set, not more seeds.
+
+**Ranking is not labeling — the trained model still must not label.** AUC asks only whether crossers
+outrank non-crossers, and it is forgiving at a 17.6% base rate where negatives outnumber positives
+4.7:1. Converted to a decision, the trained model declares crossings at **0.29 precision** (0.46 at
+its best operating point) against **geometry's 0.72**. So re-labelling GOLD or SILVER with these
+weights would degrade the dataset, and relabelling GOLD would be circular besides — it learned those
+labels. PV-LSTM's job stays ranking review candidates.
+
+**Caveats to carry with the number.** 35 test positives is thin. Two humans agreed on only 86% of
+these labels, so ~14% of the truth is itself contested — near-1.0 is not available, and a few points
+between runs mean nothing. For scale, PV-LSTM scores 0.77 on JAAD's own test split.
