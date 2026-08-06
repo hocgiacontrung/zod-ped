@@ -1,37 +1,28 @@
-"""Render a demo video of tracked pedestrians — full camera, or ZOD-website-style camera | 3D.
+"""Render a demo/QC video of tracked pedestrians.
 
 Two layouts (`--layout`):
 
-* ``split`` (default) — the ZOD-website look: a wide side-by-side frame with the FRONT CAMERA on the
-  left and an oblique 3D PERSPECTIVE point-cloud render on the right (white background, LiDAR coloured
-  by log-intensity, same scheme as the devkit's ``zod/cli/visualize_lidar.py``). On the cloud we draw
-  each GOLD pedestrian as the per-frame 3D box Step 1 shipped (zodped.labeling.boxes: tracked
-  centroid, rigid keyframe-anchor extent, velocity heading), dimmed to a thin wireframe while the
-  track is COASTING through an occlusion and drawn grey when its heading is a placeholder
-  (yaw_source == "undefined", i.e. a wholly-stationary track). The same centroid is projected back onto the camera image so the panels are
-  linked. The 3D panel uses Open3D's headless OFFSCREEN renderer (EGL) and is supersampled for crisp,
-  anti-aliased points.
+* ``split`` (default) — the ZOD-website look: front camera on the left, an oblique 3D point-cloud
+  render on the right (white background, LiDAR coloured by log-intensity). Each pedestrian is drawn
+  as the per-frame 3D box Step 1 shipped, thinned to a wireframe while the track is COASTING and
+  greyed when its heading is a placeholder (a wholly-stationary track). The same centroid is
+  projected onto the camera image so the two panels are linked. Uses Open3D\'s headless OFFSCREEN
+  renderer (EGL), supersampled.
+* ``camera`` — the camera frame only, no 3D panel and no Open3D: 2D detector box + projected centroid
+  at full resolution. Camera-frame driven, so smoother than the ~10Hz scans.
 
-* ``camera`` — the full camera frame only (no 3D panel, no Open3D dependency): every GOLD pedestrian's
-  2D detector box + projected 3D centroid at full resolution, the lightweight 2D-QC / supervisor demo.
-  Driven by camera frames (smoother) rather than the ~10 Hz LiDAR scans.
+Identity is a consistent per-pedestrian colour; coasted frames draw a hollow "coast" marker; detector
+boxes no pedestrian claimed are faint grey.
 
-Both layouts share the camera-panel drawing; identity is a consistent per-pedestrian colour, coasted
-frames draw a hollow marker labelled "coast", and detector boxes no pedestrian claimed are faint grey.
-GOLD and SILVER share the trajectories dir; ``--tier {gold,silver,all}`` picks what is drawn
-(default gold — the verified demo look).
-
-Action-QC overlay (Step 2): with ``--ped`` (or ``--show-action``) the Step-2 action record is read and
-the render is annotated so the crossing label can be eyeballed — a per-track banner (CROSSES ROAD + t_c
-/ no road cross / undetermined) and a red flash on the box and frame at the crossing-onset (t_c) frame.
-``--no-action`` disables it.
+Action-QC overlay: with ``--ped`` (or ``--show-action``) the Step-2 action record is read and the
+render annotated so the crossing label can be eyeballed — a per-track banner and a red flash at the
+crossing onset (t_c). ``--no-action`` disables it. This is how the human review clips are made.
 
 Usage:
     python scripts/viz_render_video.py --seq 000007
     python scripts/viz_render_video.py --seq 000007 --layout camera --scale 0.5
-    python scripts/viz_render_video.py --seq 000007 --window 10 --fps 15
-    python scripts/viz_render_video.py --seq 000007 --eye 0 -16 11 --look 0 18 0   # tune view
-    python scripts/viz_render_video.py --seq 000007 --ped 372DE199                 # action-QC one ped
+    python scripts/viz_render_video.py --seq 000007 --eye 0 -16 11 --look 0 18 0   # tune the view
+    python scripts/viz_render_video.py --seq 000007 --ped 372DE199 --window 18     # review clip
 """
 
 from __future__ import annotations

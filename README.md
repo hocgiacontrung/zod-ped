@@ -9,13 +9,15 @@ A multimodal pedestrian intent and trajectory prediction dataset built on top of
 intent datasets (JAAD, PIE, PSI) which are camera-only, this dataset includes
 synchronized **camera + LiDAR + radar** data across 14 European countries.
 
-**Status:** Generating Trajectories (Week 5)
+**Status:** GOLD tier built and human-verified; SILVER pour pending (Week 8).
+Current step-by-step state → `CLAUDE.md`.
 
 ## Dataset Foundation
 
-Built on ZOD Sequences (1,473 × ~20s clips). Annotations exist at one keyframe per
-sequence; this project generates pseudo-labels for pedestrian intent and trajectory
-across all frames. Working set: 358 sequences with pedestrian annotations + LiDAR.
+Built on ZOD Sequences (1,473 × ~20s clips). ZOD annotates one keyframe per sequence;
+this project generates pseudo-labels for pedestrian trajectory and crossing intent across
+all frames, in two quality tiers. Working set: 358 sequences with pedestrian annotations
++ LiDAR on disk.
 
 ## Setup
 
@@ -34,7 +36,7 @@ src/zodped/   importable library (pip install -e .): dataset, labeling, utils
 scripts/      runnable entry-points (pipeline steps, viz/demo, bring-up gates)
 notebooks/    exploration and analysis
 configs/      pipeline parameters + dataset schema
-docs/         data format reference, pipeline design, schema
+docs/         data format, pipeline design, experiments log, JAAD/PIE alignment
 ```
 
 ## License

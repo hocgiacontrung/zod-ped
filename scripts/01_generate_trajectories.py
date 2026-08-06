@@ -1,36 +1,24 @@
-"""Step 1 — GOLD-tier trajectory generation (frustum measurement + KF/RTS linker).
+"""Step 1a — GOLD-tier trajectory generation.
 
-Tracks each KEYFRAME-ANNOTATED pedestrian once over its full 20 s clip and writes a per-
-pedestrian world-frame trajectory. This is the GOLD tier: every track is anchored on the
-verified ZOD keyframe box (known position + identity), so there is no track-birth / identity
-problem — that is deferred to the SILVER tier (detector-discovered peds). See docs/PIPELINE.md
-"Step 1 — Direction & open options".
+Tracks each KEYFRAME-ANNOTATED pedestrian once over its full 20s clip. Every track is anchored on the
+verified ZOD keyframe box, so there is no track-birth or identity problem here — that is the SILVER
+tier's job (01b). Architecture (frustum measurement + KF/RTS linker) → docs/PIPELINE.md.
 
-Architecture (DETECTOR-AS-MEASUREMENT + KF/RTS-AS-LINKER):
-  0. Detections come from the Step 0 cache (data/processed/detections/, run scripts/00_detect.py
-     once); if a sequence is not cached, YOLO is loaded lazily and run live.
-  1. Per sequence, build a CANDIDATE POOL once: for every LiDAR scan, take the nearest camera
-     image's 2D boxes and lift each to a 3D world position via in-frustum LiDAR depth
-     (nearest-depth slab; zodped.labeling.frustum). The pool is pedestrian-independent and shared
-     across the sequence's GOLD peds.
-  2. Per pedestrian, seed at the keyframe box (world frame) and run the detector-association
-     linker (zodped.labeling.tracker.track_pedestrian_from_detections): CV-Kalman predict, gate the
-     pool's candidates, take the nearest in-gate one as the measurement, coast on misses, RTS smooth.
-  3. After smoothing, assemble the shipped per-frame 3D box: tracked centre + rigid keyframe extent
-     + velocity heading (zodped.labeling.boxes.assemble_track_boxes).
+Per sequence, a CANDIDATE POOL is built once from the Step-0 detection cache and shared across that
+sequence's GOLD pedestrians; each pedestrian then seeds at its keyframe box and threads the pool.
 
-Frame convention: each pool frame is timestamped at its LiDAR SCAN time (the world transform that
-lifts the frustum centre uses the scan pose), so the filter's dt and the output timestamps are
-consistent. The paired camera image is ~tens of ms away (within --max-gap); that small offset is
-well inside the frustum's ~0.15 m localization budget.
+Frame convention (non-obvious): each pool frame is timestamped at its LiDAR SCAN time, and the world
+transform that lifts the frustum centre uses that scan's pose — so the filter's dt and the output
+timestamps stay consistent. The paired camera image is tens of ms away (within --max-gap), well
+inside the frustum's ~0.15m localization budget.
 
-Output: data/processed/trajectories/{seq_id}_{pedestrian_id}.json — each frame carries the tracked
-position and the shipped 3D `box` (centre/size/yaw).
+Output: data/processed/trajectories/{seq_id}_{pedestrian_id}.json — per frame, the tracked position
+and the shipped 3D box (centre / size / yaw).
 
 Usage:
-    python scripts/00_detect.py                                  # cache YOLO boxes ONCE (~3-4 h)
-    python scripts/01_generate_trajectories.py --max-seqs 2       # smoke test (cheap, reads cache)
-    python scripts/01_generate_trajectories.py                    # full GOLD set
+    python scripts/00_detect.py                                # cache YOLO boxes ONCE (~3-4h)
+    python scripts/01_generate_trajectories.py --max-seqs 2     # smoke test (reads the cache)
+    python scripts/01_generate_trajectories.py                  # full GOLD set
 """
 
 from __future__ import annotations

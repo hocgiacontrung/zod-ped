@@ -1,187 +1,178 @@
 # Pipeline Design & Schema
 
-> These are not settled doctrine. If you see a better approach, push back — alternatives and disagreement are welcome. Don't silently follow the doc if something looks wrong, state the trade-off and make the case.
+What the pipeline *is* and why it's shaped this way. Dated results and evidence live in
+`docs/EXPERIMENTS_LOG.md`; current step-by-step state lives in `CLAUDE.md`.
+
+> Not settled doctrine. If something looks wrong, say so and make the case — don't silently follow.
 
 ## Pipeline Overview
 
-> **Action ≠ intent.** Two distinct labels live at two levels — never conflate them. The **action** (did this pedestrian cross the road, and *when*) is a verdict about the **whole track** — Step 2: computed geometrically today (feet on the ego road, the **acting** label), with **model consensus** as the decided next label source, validated against human curated labels (see "Action label source"). The **intent** is **per-window** and a separate later step: v1 is a rough, TTE-anchored label *derived* straight from the action (will t_c fall within the horizon after window_end — Step 3); behavioral intent (pose / attention / social cues — the PIE `intention_prob` sense) is a planned enrichment after that. Labeling each window by what happens *inside* it would collapse intent prediction into action detection and break comparability with JAAD/PIE.
+**Action ≠ intent.** The **action** is a verdict about the *whole track*: did this pedestrian cross
+the ego road, and at what time `t_c` (Step 2). The **intent** is *per window* and forward-looking:
+will crossing start within the horizon *after* the window ends (Step 3). Labeling a window by what
+happens *inside* it would collapse intent prediction into action detection and break comparability
+with JAAD/PIE.
 
 ```
-[pedestrian_sequences.json — sequences with LiDAR on disk]
-        ↓
-[Step 0] Detection Cache  (scripts/00_detect.py → data/processed/detections/)         [DONE]
-  - Run the 2D detector (YOLO11x) over every camera image ONCE; cache the person boxes per seq.
-  - Detects EVERYONE (GOLD + SILVER + false positives).
-        ↓
-[Step 1] Trajectory Generation  (scripts/01_generate_trajectories.py)                 [DONE]
-  - Unit of work: the PEDESTRIAN (one track per pedestrian). Tracks each over the full 20s clip.
-  - Measurement = 2D detector box → frustum-lifted to 3D; linker = KF/RTS (associate + coast + smooth); every scan ego-motion-compensated to world frame first.
-  - 3D boxes: the shipped per-frame box = tracked centre + rigid keyframe extent + velocity heading (zodped.labeling.boxes.assemble_track_boxes). Clustering is not in the product (see docs/EXPERIMENTS_LOG.md "Boxfit cluster experiment"); box size/yaw come from the keyframe anchor + motion.
-  - Two tiers (see "Two-tier labels"):
-      * 1a GOLD  (DONE) — anchor-seeded: seed at verified keyframe box, thread through the pool. 358 seqs → 1,863 tracks.
-      * 1b SILVER (RAN — pending QC) — birth-seeded (`scripts/01b_generate_silver.py`): births tracks from pool candidates no GOLD track claimed (residual pool → online MOT → support/duration confirmation + a size PRIOR). Full 358-seq pass ran: 9,394 tracks (`silver_run_report.json`) — NOT final until QC'd. Flagged.
-  - Output: per-pedestrian world-frame trajectory → data/processed/trajectories/{seq_id}_{pedestrian_id}.json (per frame: position + oriented 3D box; position_ego_rel is per-window → added later)
-
-        ↓   (Steps 2–4 are same code for GOLD and SILVER tracks)
-[Step 2] Action Labeling  (scripts/02_label_action.py — track-level, geometric ANCHOR)
-  - For each FULL track, compute the crossing ACTION (feet on the ego road) + when it happens. Pure geometry over the whole trajectory.
-      * crosses_ego_road : bool — does the track put its feet on the ego_road drivable-surface polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-limited). The JAAD/PIE "crossing the roadway" notion. This is the **acting** label; the model-consensus ACTION labeler meant to replace it is validated against human curated labels, not this geometry (the anchor batch showed geometry ~30% wrong vs a human — see "Action label source").
-      * crossing_frame_timestamp (t_c) — the crossing-onset timestamp (first frame on the road).
-  - BENCHED (2026-07-08): the ego-corridor swept-path label (`crosses_ego_corridor` + `ego_distance_at_crossing_m`) was the old primary. The label is now feet-on-road; corridor needs no per-frame road. Its computation is kept dormant in `zodped.labeling.corridor`, re-derivable as a Step-4 aux feature (ego-relevance / metric range-to-crossing). See EXPERIMENTS_LOG.
-  - EMPTY / no-real-motion tracks (real_frac=0; the "track" is Kalman coasting from a single anchor) → action = undetermined. 
-    NEVER forced to crossing/not_crossing — kept + flagged (a verified ped we could not track).
-  - Output: per-track action record (data/processed/actions/{seq_id}_{pedestrian_id}.json).
-
-        ↓
-[Step 3] Sample Assembly + Intent Labeling  (scripts/03_assemble_samples.py — per (ped, window))   [BUILT — v1 GOLD run 2026-07-15]
-  - Materialise the samples and attach the forward-looking INTENT label, derived from the Step-2 action:
-      * TTE-anchored windows: for a crosser, observation windows ENDING at t_c − TTE (the model sees motion BEFORE the event); comparison windows for non-crossers. (Not a dense stride grid — that re-introduces trivial in/post-crossing windows.)
-      * per-window filters from the TRACKED position at the window midpoint: distance_to_ego_m ≤ 50.0, distance_to_road_m ≤ 15.0; data-availability ≥ min LiDAR scans, camera frame present.
-      * per-window geometry: position_ego_rel (relative to ego at window_start) + multimodal frame pointers.
-      * ego context at window_start from vehicle_data.hdf5: ego_speed, turn_indicator (as PIE uses them).
-      * intent label per horizon h ∈ {1.0, 1.5, 2.0}s: will the ped start crossing within [window_end, window_end + h]? (forward-looking, NOT "crosses inside this window"). v1 ROUGH intent = derived straight from the Step-2 t_c. Behavioral intent (pose / attention / social cues) is a later step; model consensus labels the ACTION, not intent.
-  - Output: data/annotations/{sample_id}.json + dataset_index.parquet. Also emits per-camera-frame bbox_xyxy (projected 3D box — the JAAD/PIE model input, defined on coasted frames too).
-  - v1 GOLD run (2026-07-15, samples_run_report.json): 1,087 samples / 933 peds, 0 failures. 242 TTE-anchored + 845 comparison; crossing ratio 8.1% @1.0s / 15.5% @1.5s / 22.3% @2.0s. Biggest filter cut: distance_to_ego (460 windows).
-  - CONFOUND FIXED (same day): comparison windows anchor on the closest OBSERVED road approach, ≥0.7 real-detection fraction (`min_observed_fraction_comparison`) — before, negatives averaged 0.42 observed_frac vs 0.92 for positives (a coasting⇒not_crossing shortcut); after, 0.93 vs 0.92. Cost: 141 non-crossers with no clean window drop out (`comparison_window_unobserved`).
-
-        ↓
-[Step 4] Dataset Packaging + QA
-  - Manual review queue (scripts/qc_trajectories.py — built): ranked track review + flags.
-  - Reference baseline on GOLD = a label SANITY CHECK (are labels learnable / balanced / JAAD-PIE-comparable), QA only — the dataset is the product, not the model.
-  - Split assignment at SEQUENCE level (no window leakage between overlapping windows of one seq).
-    DONE 2026-07-16 (Step 4a, scripts/04_assign_splits.py + zodped/dataset/splits.py): stratified
-    greedy deal over all 358 working-set sequences (crosser-window strata; best of 64 seeds),
-    frozen at data/processed/splits/sequence_splits.json — re-deal only via --force, and never
-    after a result has been reported on it. Achieved (GOLD v1, target 70/10/20): 775/99/213
-    samples, crossing ratio @2.0s 0.222/0.232/0.221 (corpus 0.223). Step 3 re-runs inherit the
-    frozen mapping automatically; sequences without samples yet (142) are dealt too, so the
-    SILVER pour inherits splits instead of re-dealing.
+[pedestrian_sequences.json]
+   ↓
+[Step 0] Detection cache — YOLO11x person boxes over every camera image, once, per seq.
+   ↓      Pose cache (YOLO11-pose) alongside it. Detects EVERYONE: GOLD + SILVER + false positives.
+[Step 1] Trajectory generation — unit of work is the PEDESTRIAN, tracked over the full 20s clip.
+   ↓      Measurement = 2D box → frustum-lifted to 3D. Linker = KF/RTS. World frame throughout.
+   ↓      Shipped per-frame 3D box = tracked centre + rigid keyframe extent + velocity yaw.
+   ↓      1a GOLD  — anchor-seeded from the verified keyframe box.
+   ↓      1b SILVER — birth-seeded from pool candidates no GOLD track claimed, + a size prior.
+   ↓      → data/processed/trajectories/{seq}_{ped}.json
+   ↓
+   ↓   ——— Steps 2–4 are the same code for both tiers ———
+   ↓
+[Step 2] Action labeling — per full track, geometric.
+   ↓      crosses_ego_road : do the feet land on the ego_road polygon? (project each world point
+   ↓        through the KEYFRAME camera → point-in-polygon; FOV/range-limited by construction)
+   ↓      crossing_frame_timestamp (t_c) : first frame on the road.
+   ↓      EMPTY tracks (Kalman coasting from a single anchor, real_frac=0) → undetermined.
+   ↓        Kept and flagged, NEVER forced to a class.
+   ↓      → data/processed/actions/{seq}_{ped}.json
+   ↓
+[Step 2e] Human merge (GOLD only) — human verdicts written over geometry's two fields.
+   ↓      A separate output dir, never a mutation: Step 2 stays reproducible from geometry alone
+   ↓      and the human layer stays independently auditable.
+   ↓      → data/processed/actions_verified/{seq}_{ped}.json   ← what Step 3 should read
+   ↓
+[Step 3] Sample assembly + intent labeling — per (pedestrian, window).
+   ↓      TTE-anchored windows: for a crosser, observation windows ENDING at t_c − TTE, so the model
+   ↓        sees motion BEFORE the event. Not a dense stride grid (that re-introduces trivial
+   ↓        in-crossing and post-crossing windows).
+   ↓      Comparison windows for non-crossers, at the closest OBSERVED road approach.
+   ↓      Per-window filters from the TRACKED position at the window midpoint.
+   ↓      Per-window geometry, bbox sequences, ego context.
+   ↓      → data/annotations/{sample_id}.json + dataset_index.parquet
+   ↓
+[Step 4] Packaging + QA
+          4a splits — SEQUENCE-level stratified deal, so overlapping windows of one sequence can
+             never straddle a split. FROZEN; re-deal only via --force, and never after a result has
+             been reported on it. Sequences with no samples yet are dealt too, so the SILVER pour
+             inherits splits instead of re-dealing.
+          4b reference baseline on GOLD = a label SANITY CHECK (are the labels learnable, balanced,
+             JAAD/PIE-comparable). QA only — the dataset is the product, not the model.
 ```
 
-**Sequencing.** Build vertically on GOLD first: prove Steps 2–3 against verified, keyframe-anchored tracks (so a wrong label is a labeling bug, not track noise), 
-confirm the crossing-rate distribution and a baseline number, *then* build 1b SILVER and pour it through the same proven Steps 2–4. 
-GOLD alone is already ~1,300 usable pedestrians (≈ JAAD/PIE scale), so scale is not the blocker — end-to-end validation is.
+**Sequencing.** Build vertically on GOLD first — against verified, keyframe-anchored tracks, a wrong
+label is a labeling bug rather than track noise. Then pour SILVER through the same proven steps.
+GOLD alone is already ≈JAAD/PIE scale, so scale is not the blocker; end-to-end validation is.
 
 ## Architecture — detector-as-measurement + KF/RTS linker
 
-Pedestrians are localized per scan by a **detector** (the measurement); a **Kalman/RTS smoother** only links those measurements into a track (the linker). The linker is settled; the measurement source changed on 2026-06-18 (see "Direction & open options").
+A **detector** localizes pedestrians per scan (the measurement); a **Kalman/RTS smoother** only links
+those measurements into a track (the linker). The linker is settled; the measurement source pivoted
+on 2026-06-18 (see "Direction & open options").
 
-**Measurement — 2D → frustum lift to 3D.** A strong 2D detector (YOLO/Detectron2) boxes pedestrians on the camera stream; each box is lifted to a 3D position via ZOD calibration + in-frustum LiDAR depth (2D box → in-frustum points → nearest-depth slab). This localizes each frame *independently* of any motion model, so stop/start is captured by detection. The 2D detector also supplies appearance features (crops, body orientation, occlusion) for intent labeling. 
-**Cross-check:** projecting the 3D track back to camera via `projection.py` and comparing to the 2D track is an *agreement* metric instead of accuracy — the keyframe boxes are the only validation set.
+**Measurement — 2D → frustum lift.** A 2D detector boxes pedestrians on the camera stream; each box
+is lifted to 3D via ZOD calibration + in-frustum LiDAR depth (2D box → in-frustum points →
+nearest-depth slab). This localizes each frame *independently of any motion model*, so stop/start is
+captured by detection rather than invented by the filter — exactly the moments intent labeling keys
+off. The detector also supplies appearance features for later intent work.
 
-**Linker — constant-velocity Kalman + RTS.** Associates measurements across scans (gating), coasts through gaps, and smooths. It links boxes into a track but is NOT the source of position during normal tracking.
+**Linker — constant-velocity Kalman + RTS.** Associates measurements across scans (gating), coasts
+through gaps, smooths backward. It links boxes into a track but is NOT the source of position during
+normal tracking.
 
-**Compensate first.** Every scan's points (and detections) are lifted to a single world frame `p_world = pose(t) @ T_ego_lidar @ p_lidar`, where `T_ego_lidar = calib["FC"]["lidar_extrinsics"]` and `pose(t)` is interpolated (SLERP + lerp) from `ego_motion["poses"]` (T[world←ego], origin = ego at clip start) at the scan timestamp — so ego motion is never mistaken for pedestrian motion.
+**Compensate first.** Every scan's points and detections are lifted to one world frame,
+`p_world = pose(t) @ T_ego_lidar @ p_lidar`, where `T_ego_lidar = calib["FC"]["lidar_extrinsics"]`
+and `pose(t)` is interpolated (SLERP + lerp) from `ego_motion["poses"]` at the scan timestamp — so
+ego motion is never mistaken for pedestrian motion.
 
-Per-scan procedure:
-1. **Detect + lift**: 2D box → frustum 3D position = the measurement.
-2. **Compensate**: lift points/detections to the world frame *before* association.
-3. **Predict** the next position with the CV Kalman — used to associate (gate the next detection) and to coast, not as the source of position.
-4. **Associate**: match the in-gate detection to the track. GOLD tracks are anchored on the keyframe box (t≈10s, `location_3d` lifted to world); SILVER tracks seed on the first confident detection. Run **forward** and **backward** from the seed.
-5. **Update** Kalman; store innovation residual as `kalman_confidence`. **Coast** (predict-only, `in_observation=false`) when no detection falls in the gate; terminate after N consecutive misses.
-6. **Smooth**: RTS backward pass over the completed track.
+Per-scan: **detect + lift** → **compensate** → **predict** (to gate and to coast, not as position) →
+**associate** (GOLD anchors on the keyframe box; SILVER seeds on the first confident detection; run
+forward *and* backward from the seed) → **update** (store innovation as `kalman_confidence`) or
+**coast** (`in_observation=false`, terminate after N misses) → **RTS smooth**.
 
-Design choices (debatable): a learned detector localizes each frame independently, fixing the CV model's lag at the crossing decision — exactly the moments intent labeling keys off; compensate-before-associate; online associate + RTS smooth rather than smooth-only. A pedestrian moves <15 cm between LiDAR frames (~111 ms), so a small association gate suffices.
+A pedestrian moves <15 cm between LiDAR frames (~111 ms), so a small association gate suffices.
 
-> **Considered & set aside — gated-centroid tracker.** An earlier design used a CV Kalman gate whose centroid-of-enclosed-points was the measurement (no detector). Rejected because the CV model invents position and lags at stop/start, and the centroid is biased toward the LiDAR-facing surface. The gated-centroid measurement code was **removed** from `src/zodped/labeling/tracker.py` (2026-06-24). It is recoverable from git history if a real centroid fallback is ever wanted.
+**Cross-check.** Projecting the 3D track back to camera and comparing to the 2D track is an
+*agreement* metric, not accuracy — the keyframe boxes are the only validation set we have.
 
-## Direction & open options (updated 2026-06-18, supervisor review)
-
-The measurement source changed here. The original plan localized pedestrians with an off-the-shelf 3D detector (PointPillars / CenterPoint); the bring-up gates exposed a severe ZOD domain gap (off-the-shelf PointPillars recall 0.11–0.49, collapsing to ~0.01–0.24 beyond 40 m where ~52 % of GT lives — see `docs/EXPERIMENTS_LOG.md`). Redirected to the 2D→frustum measurement described in "Architecture": generate good-enough tracks → the maintainer reviews/corrects (3D via rerun / SUSTechPOINTS, 2D via CVAT / Label Studio).
-
-**Open options still on the table (decide as we go):**
-1. **Modern 3D detector** to add to or replace the frustum's 3D step — if a 3D model is wanted, use a *new* one (e.g. **SAM4D**).
-2. **Fine-tune on a few hand-annotated ZOD sequences** if off-the-shelf 2D→3D quality is inadequate (supervisor-endorsed fallback; 2D expected good, 3D expected weaker).
-3. ~~Change dataset~~ — **RESOLVED 2026-06-18: STAYING ON ZOD.** Re-evaluated alternatives: KITScenes, Waymo Perception, NVIDIA PhysicalAI-AV; nuScenes. ZOD keeps its cam+LiDAR+radar novelty; auto-labeling is a sound, validated methodology. Trade-off accepted: no GT trajectories → auto-generate (+ fine-tune + manual review).
-
-4. **2D-first tracking (associate → *then* lift)** — quality lever for the linker. Today the linker
-   lifts each 2D box to 3D *first* and associates identities in the world frame, i.e. it decides
-   identity on the frustum-noisy **depth** axis and discards the reliable signal (the 2D box) at the
-   lift. 2D-first inverts the order: associate in the image (IoU + optional appearance ReID, where the
-   box is reliable), then frustum-lift the finished tracklet. Fixes maneuver / pass-by identity swaps
-   and is **required for SILVER** (detector-birth has no anchor → a 2D-MOT problem). *Not* a universal
-   win: it does not fix frustum depth-jumps (measurement unchanged), can regress anchor-threaded GOLD
-   if a generic tracker fragments the seed, and `camera_front_blur` weakens ReID.  Evidence → `docs/EXPERIMENTS_LOG.md`.
-
-**Rejected:** off-the-shelf PointPillars / OpenPCDet as 3D measurement (`docs/EXPERIMENTS_LOG.md`; recoverable at git tag `experiments/3d-detectors`).
-
-## Bring-up gates (DONE — drove the 2026-06-18 pivot)
-Two experiments run before building the MOT (full in `docs/EXPERIMENTS_LOG.md`):
-1. **World-frame transform validation — PASSED.** A known-static object (`TrafficGuide`/`SnowMarker` pole) with `location_3d`, tracked through the compensate-first chain stayed **pinned** in world coordinates. Validates pose interpolation + extrinsics for every design.
-2. **Detector recall on the keyframe boxes — DONE -> NO-GO for off-the-shelf 3D.** 
-Off-the-shelf PointPillars recovered only 0.11 (KITTI)/0.49 (nuScenes) of the boxes and collapsed at range; the **frustum** (2D→3D) reached 0.585 with no training. → dropped off-the-shelf 3D detectors, adopted the 2D→frustum measurement ("Direction & open options"). Remaining open lever: fine-tune, or bring in a modern 3D detector (SAM4D).
+> **Set aside — gated-centroid tracker.** An earlier design used a CV Kalman gate whose
+> centroid-of-enclosed-points was the measurement (no detector). Rejected: the CV model invents
+> position and lags at stop/start, and the centroid is biased toward the LiDAR-facing surface.
+> Removed from `tracker.py` 2026-06-24; recoverable from git history.
 
 ## Two-tier labels — keyframe coverage
-ZOD annotates one keyframe per 20s clip, so a pedestrian present only before/after it carries no ZOD annotation. We DO admit such pedestrians, in a separate quality tier so the verified set stays clean:
-- **GOLD** — keyframe-anchored peds: verified ZOD identity + 3D box.
-- **SILVER** — detector-found peds: no human verification; flagged `label_confidence_tier=medium`, `is_in_gold_standard=false` (`low` is reserved for a possible future demoted tier).
 
-## Action label source — model-consensus labeler (decided 2026-07-15)
+ZOD annotates one keyframe per 20s clip, so a pedestrian present only before or after it carries no
+ZOD annotation. We admit those pedestrians, in a separate quality tier so the verified set stays clean:
 
-The track-level ACTION verdict (did this pedestrian cross the road, and when) moves from pure
-geometry to the **agreement of local models**, validated against **human curated labels** — the real
-ground truth. Geometry (the feet-on-road test) is only the *acting* Step-2 label until the committee
-passes: it is FOV/range-limited (the `ego_road` polygon exists only at the keyframe camera), and the
-manual anchor batch measured it ~30% wrong vs a human, so it is NOT the validation truth. Models can
-judge crossing from the video anywhere on the track. Disagreement (model↔model or model↔human) routes
-a track to manual review. This is ACTION labeling — the per-window intent label is a separate later
-step and does NOT use this consensus.
+- **GOLD** — keyframe-anchored: verified ZOD identity + 3D box.
+- **SILVER** — detector-found: no human verification. `is_in_gold_standard=false`,
+  `label_confidence_tier=medium` (`low` reserved for a possible future demoted tier).
 
-**Committee membership (revised 2026-07-16 — pretrained weights required; final trio still in
-discussion).** All three judge from different cues (bbox motion / pose / multi-modal), which is
-what makes the vote informative:
-1. **PV-LSTM** (`vita-epfl/bounding-box-prediction`) — **member #1, VALIDATED** (JAAD 2026-07-16,
-   `scripts/bringup_committee_pvlstm_jaad.py`; ZOD human-anchor gate 2026-07-27, AUC 0.74). Ships a
-   JAAD-trained multitask checkpoint (16-frame in/out @30 fps → bbox + crossing intention). Inputs:
-   bbox + bbox-velocity sequences ONLY (no images; bbox = [center_x, center_y, w, h] pixels).
-   PyTorch; clone + weights at `third_party/bounding-box-prediction` (gitignored). The intention
-   head **must be consumed as a SCORER** — p(cross) at last future frame — because the released ckpt
-   is conservative (p ≤ 0.42, so its 0.5-argmax is degenerate). Lesson: the committee takes
-   calibrated scores, not argmax verdicts, from every member.
-2. **PedGraph+** (`RodrigoGantier/Pedestrian_graph_plus`) — candidate #2. Many JAAD/PIE
-   checkpoints in-repo; GCN over 32-frame pose-keypoint windows (±velocity/image/seg branches);
-   PyTorch + Lightning. ZOD adaptation needs a pose-extraction step (e.g. YOLO11-pose on crops).
-3. **TAMformer** (`NadaSOsman/TAMformer`) — candidate #3. Pretrained checkpoints via Google Drive
-   (link in README, contents unverified); multi-modal transformer (bbox+speed+pose+crops) built
-   for EARLY prediction with variable observation lengths (suits the sweep); TF 2.10/Keras with a
-   patched-Keras requirement; ships precomputed JAAD+PIE pose pkls (50+186 MB — reusable beyond
-   TAMformer). Image branch ⇒ frame extraction only if retraining.
+Tiers are set at Step 1 only. Everything downstream is tier-agnostic and carries the flag.
 
-Out for now (no shipped weights): the pip-thesis trio, PCPA benchmark models.
+## Action label source
 
-**[PENDING] adaptation design:** these are TTE-style *window predictors*, so as ACTION labelers
-they are swept per-window over the full track and their votes aggregated into a track verdict +
-`t_c` (alternative: add a per-frame crossing head); the voting rule and how consensus combines
-with the geometric `t_c` are open — confirm with supervisor.
+Geometry (feet-on-road) is the **acting** Step-2 label, not the truth. It is FOV/range-limited by
+construction — the `ego_road` polygon exists only at the keyframe camera — and measured against a
+human it is wrong on roughly a quarter of the crossings it declares, in both directions. So:
 
-**Operational notes (2026-07-16):** JAAD + PIE *behavioral annotations* + data loaders ship on
-GitHub (JAAD lives at `data/external/JAAD` incl. 346 clips, 2.9 GB) — bbox/motion members need
-no video data at all. Disk (56 GB free) forbids frame extraction (169 GB) and PIE videos —
-decode frames on the fly; anything bigger goes to the aalto server. Zero-shot ZOD inference
-first; validate each checkpoint on JAAD's own test split before trusting it on ZOD. NEVER
-fine-tune members on our geometric labels (circular — the committee must stay an independent
-judge); domain-gap fallback = retrain on JAAD at matched window protocol, or fine-tune only on
-manually verified ZOD tracks.
-- **Domain gap to validate through** (the PointPillars lesson applies): JAAD/PIE are 30 fps,
-  unblurred dashcam; ZOD is 10.1 Hz with anonymisation blur and a 120° lens. The 0.5 s observation
-  window is ~5 ZOD frames vs their default 15 (config-exposed in the repo — retrain with the matched
-  length, don't naively resample). The image/appearance path (ViT, crops) is the most blur-exposed.
-- **GATE before scale (human-anchored):** the committee must agree with the **human** curated labels
-  — not geometry — before it labels at scale (`scripts/02b_committee_gate.py`; truth =
-  `curation_worksheet.csv`). Geometry is retired as the yardstick (spoiled).
-- **PV-LSTM gate (2026-07-27, vs human, 25 curated seqs):** AUC **0.74** with detector boxes / 0.68
-  projected (JAAD ref 0.77) — real signal, up from the 0.55 the old geometry-graded gate showed
-  (that 0.55 was mostly geometry being wrong, not the model). Detector boxes are now the default
-  input. Caveat: ~20 crossers, optimistic threshold → encouraging, not a validated pass. Next: grow
-  the anchor, add PedGraph, undistortion. Evidence → `docs/EXPERIMENTS_LOG.md` "Human-anchor gate".
+- **GOLD** — a human reviewed essentially every geometry-declared crosser. GOLD's labels are
+  **human** (`02e_merge_human_labels.py`, precedence human > geometry). The question is closed there.
+- **SILVER** — nobody will watch ~9,400 tracks, so labels come from a **committee**: geometry +
+  PV-LSTM, auto-accept where they agree, human review where they don't. Neither judge is good enough
+  alone; their agreement is much better than either (evidence → EXPERIMENTS_LOG).
+
+**Committee members.** PV-LSTM (`vita-epfl/bounding-box-prediction`) is member #1 — JAAD-trained,
+consumes bbox + bbox-velocity sequences only. Its intention head **must be used as a SCORER**
+(p(cross)), never as an argmax verdict: the released checkpoint is conservative and its 0.5 threshold
+is degenerate. That is the general rule — the committee takes calibrated scores from every member.
+PedGraph+ was evaluated as member #2 and **benched** (pose-only ceiling below PV-LSTM). TAMformer
+remains an unexplored candidate.
+
+**Never fine-tune a member on our geometric labels** — that is circular, and the committee only has
+value as an independent judge. Fine-tuning on *human-verified* tracks is legitimate, but must respect
+the frozen splits (train-split sequences only).
+
+**Domain gap to validate through** (the PointPillars lesson): JAAD/PIE are 30 fps unblurred dashcam;
+ZOD is 10.1 Hz with anonymisation blur and a 120° lens. A 0.5s observation window is ~5 ZOD frames vs
+their 15. Validate every checkpoint on its own dataset's test split before trusting it on ZOD.
+
+## Direction & open options
+
+The measurement source pivoted on 2026-06-18: off-the-shelf 3D detectors (PointPillars / OpenPCDet)
+showed a severe ZOD domain gap and were dropped for the 2D→frustum measurement above. Evidence and
+the recall numbers → EXPERIMENTS_LOG. Rejected code recoverable at git tag `experiments/3d-detectors`.
+
+Still open:
+
+1. **Modern 3D detector** (e.g. SAM4D) to add to or replace the frustum's 3D step.
+2. **Fine-tune on hand-annotated ZOD sequences** if 2D→3D quality proves inadequate
+   (supervisor-endorsed fallback; 2D expected good, 3D weaker).
+3. **2D-first tracking (associate → *then* lift).** Today the linker lifts to 3D first, so identity
+   is decided on the frustum-noisy *depth* axis while the reliable 2D box is discarded at the lift.
+   2D-first associates in the image (IoU + optional appearance ReID), then lifts the finished
+   tracklet. Fixes pass-by identity swaps and is **required for SILVER** (detector-birth is a 2D-MOT
+   problem). Not a universal win: it doesn't fix frustum depth-jumps, can fragment anchor-threaded
+   GOLD, and `camera_front_blur` weakens ReID.
+4. **`ego_road` polygon extent** — whether opposing lanes and separated bike lanes count. A real
+   share of geometry-vs-human disagreement is *definitional*, not perceptual. Cheaper to fix than
+   any model change, and it shifts the crossing rate.
+
+**Resolved: staying on ZOD** (2026-06-18). KITScenes, Waymo, nuScenes and NVIDIA PhysicalAI-AV were
+re-evaluated; ZOD keeps its cam+LiDAR+radar novelty, and auto-labeling is a sound validated
+methodology. Trade-off accepted: no GT trajectories → auto-generate + manual review.
 
 ## Schema, parameters & filters
 
-Full, authoritative field-by-field spec → **`configs/dataset_schema_v0.2.yaml`** (live source of truth; `v0.1` is the frozen supervisor-approved Week-1 snapshot). Summary:
+Authoritative field-by-field spec → **`configs/dataset_schema_v0.2.yaml`** (`v0.1` = frozen
+supervisor-approved Week-1 snapshot). Summary:
 
-- **Windowing**: 0.5 s observation window, prediction horizons [1.0, 1.5, 2.0] s, TTE-anchored on the Step-2 crossing onset (not a dense stride grid).
-- **Sample unit**: per (pedestrian, window); `sample_id = {seq}_{ped}_{window_start_ms}`. Carries the forward-looking intent label (+ soft label), the per-frame trajectory (world + ego-relative), multimodal file pointers, ego/pedestrian context, and metadata (incl. the GOLD/SILVER tier flags).
-- **Action vs intent**: Step 2 emits the track-level **action** (`crosses_ego_road` + `crossing_frame_timestamp` (`t_c`); EMPTY tracks → `undetermined`) — **action label source DECIDED (2026-07-15): model consensus**, validated against human curated labels (geometry is the acting label only — see "Action label source" above). Step 3 derives the per-window forward-looking **rough intent** from that action (`t_c` × horizon); **behavioral intent labeling** (pose / attention / social cues) follows as its own step (see `docs/JAAD_PIE_ALIGNMENT.md` for the surrounding taxonomy debate). The two never share a field.
-- **Filters by stage**: Step 1 selects pedestrians with a 3D keyframe box (`require_3d_annotation`); Step 2 (action) applies **no** filter — it labels every track; Step 3 (assembly) applies the per-window gates from TRACKED positions — proximity (`distance_to_ego ≤ 50 m`, `distance_to_road ≤ 15 m`, at the window midpoint) and data-availability (`min_lidar_frames_in_window`). Proximity is deferred to Step 3 because the single keyframe annotation is a poor proxy for windows up to ~14 m away; a keyframe LiDAR-in-box check is *not* a hard filter (GOLD seeds geometrically).
-- **Output**: one JSON per sample + a Parquet index of all scalar fields (fast filtering).
-- **Scale (target, PENDING)**: ~10–15 windows/seq after filtering across the 358-seq working set; total sample count + crossing ratio to be recomputed after Step 2/3 and confirmed with supervisor.
+- **Windowing** — 0.5s observation window; prediction horizons 1.0 / 1.5 / 2.0s; TTE-anchored on `t_c`.
+- **Sample unit** — per (pedestrian, window); `sample_id = {seq}_{ped}_{window_start_ms}`. Carries the
+  forward-looking intent label, per-frame trajectory (world + ego-relative), multimodal file pointers,
+  ego and pedestrian context, and the tier flags.
+- **Filters by stage** — Step 1 selects pedestrians with a 3D keyframe box. Step 2 applies **no**
+  filter (it labels every track). Step 3 applies the per-window gates from tracked positions:
+  proximity (`distance_to_ego ≤ 50m`, `distance_to_road ≤ 15m`, at the window midpoint) and data
+  availability (`min_lidar_frames_in_window`, camera frame present). Proximity is deferred to Step 3
+  because the single keyframe annotation is a poor proxy for windows seconds away.
+- **Output** — one JSON per sample + a Parquet index of all scalar fields for fast filtering.

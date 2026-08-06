@@ -122,5 +122,5 @@ See `src/zodped/utils/projection.py`.
   ...
 ]
 ```
-358 total entries. LiDAR available for seq 000000–000479 (130 sequences with pedestrians).
-Working set = entries where `lidar_batch` is one of the 12 downloaded batches.
+358 entries — the working set. All 358 have `lidar_velodyne/` on disk (LiDAR for non-pedestrian
+sequences was pruned; 1,473 sequence dirs exist in total).

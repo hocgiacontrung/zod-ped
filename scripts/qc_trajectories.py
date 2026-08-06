@@ -1,42 +1,34 @@
-"""Step 1 QC — score trajectories (per tier) and rank a manual-review queue.
+"""Step 1 QC — score trajectories and rank a manual-review queue.
 
-GOLD and SILVER tracks share the trajectories dir, so the population is chosen EXPLICITLY with
-`--tier {gold,silver,all}` (default all — GOLD+SILVER together for review). GOLD-only baseline
-numbers = `--tier gold`; SILVER QC alone = `--tier silver`.
+Turns the qualitative "watch the demo video" pass into a scalable gate. Reads the trajectory JSONs
+plus the Step-1 run report (for each sequence\'s pool-frame count) and derives, per track, quality
+signals that need no detector re-run:
 
-Turns the qualitative "watch the demo video" pass into a scalable, quantitative gate. Reads the
-per-pedestrian trajectory JSONs (data/processed/trajectories/) plus the Step 1 run report (for each
-sequence's pool-frame count) and, per track, derives quality signals that are computable WITHOUT
-re-running the detector:
-
-  - span_fraction   : n_frames / n_pool_frames — did the track cover its clip, or did the linker
-                      lose it early? (A pass terminates after `max_consecutive_misses` coasts, so a
-                      short span is the strongest "the track died" signal.)
-  - real_frac       : fraction of frames with a REAL frustum measurement (num_lidar_points >= 0).
-                      Excludes the keyframe anchor seed, so a zero-measurement stub reads 0.0 (flagged
-                      EMPTY) rather than a misleading ~0.09. (observed_frac, kept for continuity,
-                      still counts the anchor.)
-  - longest_coast   : longest consecutive coast run, and how many distinct coast runs there are.
-  - median_lidar_pts: median in-frustum LiDAR points on observed frames — low => far/sparse/noisy lift.
+  - span_fraction   : n_frames / n_pool_frames — did the track cover its clip, or did the linker lose
+                      it early? A pass terminates after `max_consecutive_misses` coasts, so a short
+                      span is the strongest "this track died" signal.
+  - real_frac       : fraction of frames with a REAL frustum measurement. Excludes the keyframe anchor
+                      seed, so a zero-measurement stub reads 0.0 (flagged EMPTY) rather than ~0.09.
+                      (observed_frac, kept for continuity, still counts the anchor.)
+  - longest_coast   : longest consecutive coast run, and how many distinct runs there are.
+  - median_lidar_pts: median in-frustum points on observed frames — low means far / sparse lift.
   - median_conf     : median Kalman confidence on observed frames.
-  - max_speed       : fastest inter-frame world-frame speed — implausible spikes flag mis-association.
+  - max_speed       : fastest inter-frame world speed — implausible spikes flag mis-association.
 
-Each track gets a list of FLAGS (thresholds are CLI-tunable) and the corpus is summarised by flag
-counts and by anchor occlusion — which is the data-driven read on "is YOLO11 good enough":
+Each track gets FLAGS (thresholds CLI-tunable); the corpus is summarised by flag counts and by anchor
+occlusion, which is the data-driven read on whether the 2D detector is the limiter: low coverage on
+None/Light-occlusion anchors points at detector misses, on Heavy anchors at genuine occlusion, and
+low median_lidar_pts at frustum starvation rather than 2D.
 
-  - low coverage concentrated on None/Light-occlusion anchors  -> detector misses (improve detector)
-  - low coverage concentrated on Heavy/VeryHeavy anchors        -> genuine occlusion (expected; filter)
-  - low median_lidar_pts on the flagged tracks                  -> frustum starvation / range, not 2D
-
-True per-coast attribution (detector-miss vs gate-reject) needs the candidate pool rebuilt
-(re-run the detector); drill into a specific bad track with scripts/viz_render_video.py.
+GOLD and SILVER share the trajectories dir, so the population is chosen explicitly with --tier.
+Attributing a specific coast to detector-miss vs gate-reject needs the pool rebuilt; drill into one
+bad track with scripts/viz_render_video.py.
 
 Usage:
     python scripts/qc_trajectories.py                       # score GOLD, print queue + summary
     python scripts/qc_trajectories.py --tier silver         # SILVER QC pass
-    python scripts/qc_trajectories.py --seq 000007          # one sequence
+    python scripts/qc_trajectories.py --seq 000007
     python scripts/qc_trajectories.py --top 40 --csv data/processed/review/qc.csv
-    python scripts/qc_trajectories.py --min-span 0.6 --min-observed 0.5 --max-speed 3.5
 """
 
 from __future__ import annotations
