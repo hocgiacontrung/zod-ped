@@ -2,7 +2,7 @@
 # ZOD Pedestrian Intent & Trajectory Dataset — Schema v0.2
 # Last updated: 2026-06-30
 #
-# SUPERSEDES v0.1 (configs/dataset_schema_v0.1.yaml), which is kept frozen as the
+# SUPERSEDES v0.1 (retired at git tag experiments/committee-pose-bringup), which was the
 # supervisor-approved Week-1 snapshot. This file is the LIVE source of truth; it reconciles
 # the schema with the post-pivot pipeline reality. Changes vs v0.1:
 #   - filtering: split into Step-1 pedestrian selection vs Step-2 per-window assembly;

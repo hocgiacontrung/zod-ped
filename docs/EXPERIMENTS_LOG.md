@@ -485,3 +485,39 @@ labels. PV-LSTM's job stays ranking review candidates.
 **Caveats to carry with the number.** 35 test positives is thin. Two humans agreed on only 86% of
 these labels, so ~14% of the truth is itself contested — near-1.0 is not available, and a few points
 between runs mean nothing. For scale, PV-LSTM scores 0.77 on JAAD's own test split.
+
+---
+
+## Wrap-up cleanup — snapshot instead of release (2026-08-08)
+
+**Decision: no public release.** The supervisor's read is that the labels are still too raw to hand
+to anyone, and the project's own numbers agree — only 217 of 9,247 pedestrians have been watched by
+a human, human review flipped 26% of the labels it checked, SILVER's accuracy has never been
+measured directly, and two reviewers agreed with each other only 86% of the time. Step 4c therefore
+builds an **INTERNAL snapshot**, not a release: a checksummed bundle whose purpose is to pin
+reported numbers to one exact state of the data, so a later re-run cannot silently move them.
+
+The snapshot's README is the generated **label & tracking summary** (`docs/LABEL_SUMMARY.md`) —
+per stage: what went in, what came out, and what is known about the error introduced. Every figure
+is read from the run reports and the index by `zodped.dataset.stats.pipeline_stages`, so the
+document cannot drift from the artifacts. It replaces the idea of a hand-written summary doc.
+
+**Found while writing the loader: a label-leakage trap in the shipped samples.**
+`trajectory.frames` spans `[window_start, window_end + max_horizon]`, so on a 300-sample check
+231 samples carried future frames and **8 of 13 frames on average lie after the window ends**.
+Anything that reads the array whole is training on the answer. The data is unchanged (those frames
+are the legitimate trajectory-prediction target); `loader.positions_array` defaults to
+`part="observed"` so the naive call is safe, and `part="future"` is opt-in. Note that the per-frame
+`in_observation` flag does NOT mean this — it flags a real detection versus a coasted one.
+
+**Radar became per-window.** ZOD ships one structured `.npy` per sequence (~45k returns, all sweeps);
+`radar_path` alone was a whole-sequence blob. `loader.load_radar_window` slices it on the per-return
+timestamp — a 0.5s window yields ~8 sweeps / ~1,000 returns.
+
+**Removed, recoverable at git tag `experiments/committee-pose-bringup`:** the committee gates
+(`02b_committee_gate.py`, `02c_committee_gate_pedgraph.py`, `labeling/committee.py`), the review-queue
+builder (`02d_build_review_queue.py`, its output is merged and frozen), the pose scorer path
+(`00b_extract_pose.py`, `labeling/pose_cache.py`, `labeling/pose_estimator.py` — PedGraph was
+benched and nothing downstream consumed the cache), the benched `labeling/corridor.py`, the four
+one-off `bringup_*.py` gates, `notebooks/02_bringup_gates.ipynb`, and `dataset_schema_v0.1.yaml`.
+Earlier entries in this log reference those files by name; the tag is where they live now.
