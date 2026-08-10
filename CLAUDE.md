@@ -21,7 +21,7 @@ Two tiers, set at Step 1 only; Steps 2–4 are tier-agnostic and carry `is_in_go
 
 | step | script | state |
 |---|---|---|
-| 0 · detection cache | `00_detect.py`, `00b_extract_pose.py` | DONE — all 358 seqs |
+| 0 · detection cache | `00_detect.py` | DONE — all 358 seqs |
 | 1a · GOLD trajectories | `01_generate_trajectories.py` | DONE — **1,863 tracks** |
 | 1b · SILVER trajectories | `01b_generate_silver.py` | DONE — 9,394 tracks → **7,384 peds** after cut+stitch |
 | 2 · action labels (geometry) | `02_label_action.py` | DONE — **9,247 pedestrians** (`--stitch` for SILVER) |
@@ -29,8 +29,9 @@ Two tiers, set at Step 1 only; Steps 2–4 are tier-agnostic and carry `is_in_go
 | 3 · samples + intent | `03_assemble_samples.py` | DONE both tiers — **4,449 samples / 4,285 peds** |
 | 4a · splits | `04_assign_splits.py` | **FROZEN** — inherited by the pour (3,074/492/883) |
 | 4b · reference baseline | `04b_train_baseline.py` | DONE — GOLD test **AUC 0.76**, labels learnable |
+| 4c · snapshot + summary | `05_package_snapshot.py` | DONE — checksummed INTERNAL snapshot; README = `docs/LABEL_SUMMARY.md` |
 
-**Next:** dataset packaging + release notes. The label sanity check PASSED — a PV-LSTM retrained on
+**Next:** release notes + final presentation. The label sanity check PASSED — a PV-LSTM retrained on
 our data scores **AUC 0.763 ± 0.025 / AP 0.375** on human-verified GOLD test (chance 0.50 / 0.18),
 up from 0.52 zero-shot. Headline is the GOLD-only arm: adding SILVER to training measured +0.036 AUC,
 which is inside the noise (3/5 seeds) — SILVER does not poison, but it is not shown to help.
@@ -90,10 +91,11 @@ zod-ped/
 │   │   ├── reports/                   ← run reports
 │   │   └── splits/                    ← Step 4a FROZEN sequence_splits.json
 │   ├── annotations/            ← Step 3 per-sample JSON + dataset_index.parquet
+│   ├── snapshots/              ← Step 4c bundles (gitignored; rebuild with 05_package_snapshot.py)
 │   ├── external/JAAD/          ← ykotseruba/JAAD clone + JAAD_clips/
 │   └── pedestrian_sequences.json
 ├── src/zodped/                 ← the importable library (`pip install -e . --no-deps`)
-│   ├── dataset/                ← keyframe.py, splits.py
+│   ├── dataset/                ← keyframe.py, splits.py, stats.py, loader.py, packaging.py
 │   ├── labeling/               ← detector, detection_cache, frustum, tracker, boxes, committee
 │   └── utils/                  ← projection.py, ego_motion.py, vehicle_data.py, video.py
 ├── scripts/                    ← entry-points (thin: argparse + I/O + calls into zodped)
@@ -108,4 +110,5 @@ zod-ped/
 | `docs/PIPELINE.md` | pipeline design, architecture, schema summary, open options |
 | `docs/EXPERIMENTS_LOG.md` | dated evidence — every result and decision, with numbers |
 | `docs/JAAD_PIE_ALIGNMENT.md` | JAAD/PIE taxonomy, curation rules, open naming decisions |
-| `configs/dataset_schema_v0.2.yaml` | authoritative field-by-field spec (`v0.1` = frozen Week-1 snapshot) |
+| `docs/LABEL_SUMMARY.md` | GENERATED per-stage label & tracking summary — the report backbone |
+| `configs/dataset_schema_v0.2.yaml` | authoritative field-by-field spec (the only one; `v0.1` retired) |

@@ -3,13 +3,11 @@ data/raw/
 data/processed/
 data/annotations/
 data/external/
+# Step 4c internal snapshots — rebuildable from the artifacts above
+data/snapshots/
 data/splits/*.parquet
 
-# Third-party model repos + downloaded checkpoints (committee members)
-third_party/
-
 # Outputs
-outputs/
 *.log
 *.ckpt
 

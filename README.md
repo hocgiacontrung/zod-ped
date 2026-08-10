@@ -20,6 +20,23 @@ this project generates pseudo-labels for pedestrian trajectory and crossing inte
 all frames, in two quality tiers. Working set: 358 sequences with pedestrian annotations
 + LiDAR on disk.
 
+## Using the dataset
+
+```bash
+python scripts/05_package_snapshot.py --summary-to docs/LABEL_SUMMARY.md
+python scripts/05_package_snapshot.py --verify data/snapshots/zod-ped-v0.2
+```
+
+**Not a public release.** The labels are auto-generated and only partially human-verified; the
+snapshot exists to pin reported numbers to one exact, checkable state of the data. Its README is
+the generated **label & tracking summary** — what each stage did and what is known about its error
+(`docs/LABEL_SUMMARY.md`).
+
+The bundle carries annotations, frozen splits, schema, reference docs, a manifest, and SHA-256 over
+every file. Raw ZOD frames are never copied — samples hold relative pointers, resolved with
+`zodped.dataset.loader.media_paths`. Read it with `zodped.dataset.loader`, which works on the
+bundle or on `data/annotations/` unchanged.
+
 ## Setup
 
 ```bash

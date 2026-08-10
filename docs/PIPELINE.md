@@ -17,7 +17,7 @@ with JAAD/PIE.
 [pedestrian_sequences.json]
    ↓
 [Step 0] Detection cache — YOLO11x person boxes over every camera image, once, per seq.
-   ↓      Pose cache (YOLO11-pose) alongside it. Detects EVERYONE: GOLD + SILVER + false positives.
+   ↓      Detects EVERYONE: GOLD + SILVER + false positives.
 [Step 1] Trajectory generation — unit of work is the PEDESTRIAN, tracked over the full 20s clip.
    ↓      Measurement = 2D box → frustum-lifted to 3D. Linker = KF/RTS. World frame throughout.
    ↓      Shipped per-frame 3D box = tracked centre + rigid keyframe extent + velocity yaw.
@@ -56,7 +56,23 @@ with JAAD/PIE.
              inherits splits instead of re-dealing.
           4b reference baseline on GOLD = a label SANITY CHECK (are the labels learnable, balanced,
              JAAD/PIE-comparable). QA only — the dataset is the product, not the model.
+          4c snapshot — annotations + frozen splits + schema + docs into one checksummed,
+             manifested bundle, whose README is the generated LABEL & TRACKING SUMMARY. INTERNAL:
+             it pins reported numbers to one exact state of the data, it is not a release. No raw
+             ZOD frames — samples ship relative pointers, so it stays megabytes and re-distributes
+             none of ZOD's CC BY-SA data.
+             → data/snapshots/zod-ped-v{version}/   (read with zodped.dataset.loader)
 ```
+
+**One counting path.** `zodped.dataset.stats` computes the funnel, the composition, and the
+per-stage provenance; `scripts/dataset_stats.py`, the snapshot manifest and `docs/LABEL_SUMMARY.md`
+all render *that*, so no reported number can disagree with the artifacts.
+
+**Consumer trap worth knowing.** A sample's `trajectory.frames` spans
+`[window_start, window_end + max_horizon]` — most rows are the FUTURE, i.e. the trajectory-prediction
+target. `loader.positions_array` defaults to `part="observed"` so the naive call cannot leak the
+label; the raw JSON offers no such guard. (`in_observation` is unrelated — it flags a real detection
+versus a coasted frame.)
 
 **Sequencing.** Build vertically on GOLD first — against verified, keyframe-anchored tracks, a wrong
 label is a labeling bug rather than track noise. Then pour SILVER through the same proven steps.
@@ -171,8 +187,7 @@ methodology. Trade-off accepted: no GT trajectories → auto-generate + manual r
 
 ## Schema, parameters & filters
 
-Authoritative field-by-field spec → **`configs/dataset_schema_v0.2.yaml`** (`v0.1` = frozen
-supervisor-approved Week-1 snapshot). Summary:
+Authoritative field-by-field spec → **`configs/dataset_schema_v0.2.yaml`**. Summary:
 
 - **Windowing** — 0.5s observation window; prediction horizons 1.0 / 1.5 / 2.0s; TTE-anchored on `t_c`.
 - **Sample unit** — per (pedestrian, window); `sample_id = {seq}_{ped}_{window_start_ms}`. Carries the
