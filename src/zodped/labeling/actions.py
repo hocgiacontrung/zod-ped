@@ -3,19 +3,22 @@
 ACTION is a geometric fact about the WHOLE track: did this pedestrian cross the ego road, and WHEN.
 Computed once per track: pure geometry over the trajectory Step 1 produced.
 
-The crossing ACTION is `crosses_ego_road` — does the track put its feet on ego_road
-drivable-surface polygon. The polygon is image-pixel and annotated at KEYFRAME, so each world
-point is projected through the keyframe camera and tested for containment (FOV/range-limited by
-construction). This is "crossing the roadway" notion and, going forward, the geometric
-GROUND-TRUTH ANCHOR against which the model-consensus ACTION labeler (same track-level verdict; see
-docs/PIPELINE.md "Action label source") is validated — geometry stays the acting label until that
-labeler passes its GOLD gate. Per-window intent is derived downstream in Step 3.
+The crossing ACTION is `crosses_ego_road` — does the track land on the ego_road drivable-surface
+polygon, the JAAD/PIE "crossing the roadway" notion. The polygon is image-pixel and annotated at
+the KEYFRAME, so each world point is projected through the keyframe camera and tested for
+containment (FOV/range-limited by construction). Per-window intent is derived downstream in Step 3.
 
-The ego-corridor swept-path signal that used to be the primary label here is benched,
-in zodped.labeling.corridor and can be revived as a Step-4 aux feature.
+Two known defects, measured and deliberately NOT fixed (the splits are frozen and the snapshot is
+checksummed, so changing the rule would move every reported number) — EXPERIMENTS_LOG 2026-08-11:
+the projected point is the box CENTRE rather than the feet, and `EgoRoad_Debris` polygons count as
+road. Both inflate false positives.
+
+The ego-corridor swept-path signal that used to be the primary label here was benched 2026-07-08
+and removed; it is recoverable at git tag `experiments/committee-pose-bringup`.
 
 EMPTY tracks (no real detection beyond the anchor; the trajectory is pure Kalman coast) carry no
-usable motion, so their action is `undetermined` - kept and flagged: a verified pedestrian we could not track.
+usable motion, so their action is `undetermined` — kept and flagged: a verified pedestrian we could
+not track.
 """
 
 from __future__ import annotations

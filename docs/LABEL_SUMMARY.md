@@ -7,7 +7,7 @@
 
 Multimodal pedestrian intent & trajectory dataset built on the Zenseact Open Dataset (ZOD). Camera + LiDAR + radar, where JAAD/PIE/PSI are camera-only.
 
-Built 2026-08-08T19:06:28+00:00 from commit `7dca4f395f8c` (tree dirty at build time).
+Built 2026-08-10T06:58:33+00:00 from commit `b4d74d6b7fb5`.
 Schema: `schema/dataset_schema_v0.2.yaml`.
 
 ## Read this first — what state the labels are actually in
@@ -47,6 +47,67 @@ this person cross the ego road, and when. `intent.labels_by_horizon` is *per win
 action field turns intent prediction into action detection and breaks comparability with JAAD/PIE.
 
 Labels are provided at three prediction horizons: 1.0, 1.5, 2.0 seconds.
+
+## Dataset structure
+
+One JSON per sample under `annotations/`, plus `dataset_index.parquet` carrying every scalar field
+below (one row per sample) for filtering without opening the JSONs. Types, allowed values and the
+reasoning behind each field → `schema/dataset_schema_v0.2.yaml`.
+
+**Identity and timing**
+- `sample_id` — `{sequence_id}_{pedestrian_id}_{window_start_ms}`, unique per sample.
+- `sequence_id`, `pedestrian_id` — the ZOD clip, and the tracked person within it.
+- `window_start_timestamp`, `window_end_timestamp` — UTC; the window is 0.5s wide.
+- `keyframe_timestamp` — ZOD's single annotated instant, the centre of the 20s clip. It is NOT
+  necessarily inside this window.
+- `window_kind` — `tte_anchored` (a crosser's window, cut at a fixed lead time before the crossing)
+  or `closest_approach` (a non-crosser's comparison window, at their nearest approach to the road).
+- `anchor_tte_s` — the lead time this window was cut at; null for comparison windows.
+
+**`action` — one verdict for the WHOLE track**
+- `crosses_ego_road` — did this pedestrian put themselves on the ego road at any point.
+- `crossing_frame_timestamp` — `t_c`, the crossing onset; null when they never cross.
+- `status` — `determined` or `undetermined` (kept and flagged, never forced to a class).
+- `method` — `rule_based_geometry`, or `human_verified` where a person adjudicated the track.
+
+**`intent` — one label per WINDOW, looking forward**
+- `labels_by_horizon` — `crossing` / `not_crossing` at each of 1.0, 1.5, 2.0s. The label asks
+  whether `t_c` falls in the horizon AFTER `window_end`, not what happens inside the window.
+- `label` — the scalar reading of the above at this window's own `anchor_tte_s`.
+- `crossing_definition` — the rule in one line, carried with the data.
+- `confidence`, `soft_label` — `p_crossing` / `p_not_crossing` / `p_uncertain`.
+
+**`trajectory.frames[]` — the observation window, ~5 frames at 10.1 Hz**
+- `timestamp`, `in_observation` — the instant, and whether the detector really saw the pedestrian
+  there or the tracker coasted through a miss.
+- `position_world[3]`, `position_ego_rel[3]` — metres, world frame and ego-relative.
+- `box.center_world[3]`, `box.size_lwh[3]`, `box.yaw_world`, `box.yaw_source` — the tracked 3D box.
+- `num_lidar_points`, `kalman_confidence`, `tracking_method` — how well supported that frame is.
+
+> The array spans `[window_start, window_end + max_horizon]`, so it deliberately contains frames
+> AFTER the window — they are the trajectory-prediction target. Reading it whole trains on the
+> answer. `loader.positions_array` defaults to `part="observed"`; future frames are opt-in.
+
+**`multimodal` — pointers into ZOD, which is not bundled**
+- `camera_frames[]` — `path`, `timestamp`, `bbox_xyxy[4]` (the 3D box projected into the image),
+  `bbox_source`, `n_box_corners_visible`.
+- `lidar_scans[]` — `path`, `timestamp`; one scan per frame.
+- `radar_path` — the sequence's radar file; slice it to this window with
+  `loader.load_radar_window`.
+
+**`context` — the scene at the window midpoint**
+- `ego_speed_ms`, `ego_heading_deg`, `turn_indicator` — what the ego vehicle was doing.
+- `distance_to_ego_m`, `distance_to_road_m` — metres, from LiDAR rather than estimated from pixels.
+- `occlusion` — ZOD's keyframe occlusion level; `n/a` outside the GOLD tier.
+- `observed_fraction_window` — share of the window that is real detection rather than coast.
+
+**`metadata` — provenance and how to split**
+- `split` — `train` / `val` / `test`, assigned at SEQUENCE level and frozen.
+- `is_in_gold_standard`, `label_confidence_tier` — which tier this row belongs to. Evaluate on GOLD.
+- `location`, `collection_date` — ZOD's country code and capture date.
+- `num_pedestrians_in_scene`, `is_key_pedestrian` — scene context. Both depend on the tier a Step-3
+  run loaded; the shipped values come from the full pass.
+
 
 ## Contents
 

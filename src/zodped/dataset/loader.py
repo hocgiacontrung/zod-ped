@@ -10,14 +10,12 @@ The split of responsibility:
   * `boxes_array` / `positions_array` — the two arrays a model actually trains on.
   * `media_paths` / `load_radar_window` — resolve sensor pointers against the raw ZOD tree.
 
-**The one trap worth knowing.** A sample's `trajectory.frames` covers the observation window AND
-the prediction horizon after it, so most of its rows are the future. `positions_array` therefore
-defaults to `part="observed"`; ask for `part="future"` explicitly when you want the prediction
-target. `boxes_array` is window-only and needs no such flag.
+**The one trap worth knowing.** A sample's `trajectory.frames` runs past the observation window
+into the prediction horizon, so reading it whole leaks the label. `positions_array` defends
+against this by default — see `_part_indices` for the rule.
 
-Sensor pointers in a sample are RELATIVE to the sequence directory
-(`camera_front_blur/....jpg`), so the raw ZOD data stays outside the release bundle and its
-licence is never re-distributed. Resolving them needs the ZOD sequences root.
+Sensor pointers are RELATIVE to the sequence directory (`camera_front_blur/....jpg`), so
+resolving them needs the ZOD sequences root.
 
 Quickstart:
 
@@ -170,9 +168,8 @@ def positions_array(doc: dict, frame: str = "world", part: str = "observed") -> 
     geometry) or ``"ego_rel"`` (relative to the ego vehicle at window start — use this when the
     ego's own motion should be visible).
 
-    `part` selects observation window / future / both; see `_part_indices`. It defaults to
-    ``observed`` because the shipped trajectory extends past the window and passing the future in
-    as a feature would leak the label.
+    `part` selects observation window / future / both, and defaults to ``observed``; see
+    `_part_indices`.
     """
     key = {"world": "position_world", "ego_rel": "position_ego_rel"}.get(frame)
     if key is None:

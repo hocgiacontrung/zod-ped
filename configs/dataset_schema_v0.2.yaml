@@ -1,43 +1,14 @@
 # ============================================================
 # ZOD Pedestrian Intent & Trajectory Dataset — Schema v0.2
-# Last updated: 2026-06-30
+# Last updated: 2026-08-14
 #
-# SUPERSEDES v0.1 (retired at git tag experiments/committee-pose-bringup), which was the
-# supervisor-approved Week-1 snapshot. This file is the LIVE source of truth; it reconciles
-# the schema with the post-pivot pipeline reality. Changes vs v0.1:
-#   - filtering: split into Step-1 pedestrian selection vs Step-2 per-window assembly;
-#     require_lidar_detection is no longer a hard filter (GOLD seeds geometrically).
-#   - trajectory.frames: added num_lidar_points; in_observation re-defined to mean "detector
-#     observed this scan" (false while coasting), matching the tracker output.
-#   - 2026-06-24: removed trajectory.frames.tracking_lost — it was byte-identical to
-#     `not in_observation` (a coast IS the lost state in this single-pass design); per-doc
-#     trajectory schema bumped v0.1 -> v0.2 and existing outputs migrated.
-#   - trajectory generation notes: 2D detector → frustum lift + KF/RTS linker (was LiDAR IoU / nearest-neighbor).
-#   - intent: added soft_label.
-#   - 2026-06-30: split ACTION (track-level, Step 2) from INTENT (forward-looking per-window, Step 3)
-#     so the two are never conflated. Added an `action` block (crosses_ego_corridor [primary] +
-#     crossing_frame_timestamp/t_c + ego_distance_at_crossing_m + crosses_ego_road [complement] +
-#     undetermined status for EMPTY tracks). Redefined intent.label as the forward-looking
-#     prediction (t_c within the horizon after window_end), resolving the v0.1 crossing_definition
-#     TBD. Windowing is now TTE-anchored (was a 0.25s dense stride grid). Step renumber: action =
-#     Step 2, sample assembly + intent = Step 3 (filters moved to Step 3). See docs/PIPELINE.md.
-#   - dataset_stats: basis is the 358-sequence working set; totals PENDING recomputation.
-#   - 2026-07-15: reconciled intent + windowing with the 2026-07-08 corridor bench. ACTION label source CONFIRMED as model consensus: 3
-#     local JAAD/PIE-trained models (LSTM-LSTM baseline, LSTM-diffusion, transformer-diffusion) vote on the TRACK-LEVEL verdict (crossed / not, and
-#     when); the geometric feet-on-road test is the validation ANCHOR, not final label. INTENT
-#     is per-window and a SEPARATE later step.
-#     Replaced the stale v0.1-era rule/pose/VLM method mix. Action ≠ intent — never conflate.
-#   - 2026-07-16: consensus-committee membership revised (pretrained weights required): PV-LSTM
-#     first + PedGraph+/TAMformer candidates; pip-thesis + PCPA out for now. Still in discussion.
-#   - 2026-07-15 (b): Step 3 IMPLEMENTED (scripts/03_assemble_samples.py, zodped.labeling.samples).
-#     Additions the implementation materialises: sample.anchor_tte_s + sample.window_kind (window
-#     provenance), intent.labels_by_horizon (label per horizon; scalar `label` reads at the
-#     window's own anchor TTE), multimodal.camera_frames[].bbox_xyxy (+ bbox_source,
-#     n_box_corners_visible — the tracked 3D box projected per camera frame: the observation
-#     input of the JAAD/PIE model family, defined on coasted frames too), and
-#     context.observed_fraction_window. distance_to_road_m is measured against the road SURFACE
-#     in 3D (keyframe-scan LiDAR points inside ego_road, lifted to world) — same point-in-polygon
-#     test as Step 2, no fisheye unprojection.
+# The authoritative field-by-field spec for a shipped sample. SUPERSEDES v0.1 (retired at git tag
+# experiments/committee-pose-bringup), the supervisor-approved Week-1 snapshot.
+#
+# This file describes the schema as it SHIPS. It is not a changelog — why each field is shaped the
+# way it is lives in docs/PIPELINE.md, and the dated evidence behind every decision lives in
+# docs/EXPERIMENTS_LOG.md. If this file and the artifacts disagree, the artifacts are right
+# (python scripts/dataset_stats.py).
 #
 # STATUS LEGEND:
 #   [CONFIRMED]  — decided, ready to implement
@@ -134,16 +105,12 @@ sample:
   # ─────────────────────────────────────────
   # ACTION LABEL (track-level — Step 2; denormalised into each of the pedestrian's samples)
   # ─────────────────────────────────────────
-  # The ACTION is about the WHOLE track: did this pedestrian cross, and WHEN.
-  # It is computed once per track in Step 2 and copied into every
-  # sample of that pedestrian. Do NOT conflate with `intent` (the forward-looking
-  # per-window PREDICTION derived from this action.)
+  # The ACTION is about the WHOLE track. Do NOT conflate with `intent`
   action:
-    # [CONFIRMED] CROSSING ACTION — does the track put its feet on the ego_road drivable-surface
-    # polygon (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-
-    # limited). This is the JAAD/PIE "crossing the roadway" notion. It is the geometric GROUND-TRUTH
-    # ANCHOR for the model-consensus ACTION labeler (see `method` below) — geometry validates the
-    # consensus verdict, and remains the acting label until that labeler passes its GOLD gate.
+    # [CONFIRMED] CROSSING ACTION — does the track land on the ego_road drivable-surface polygon
+    # (project the world point through the KEYFRAME camera → point-in-polygon; FOV/range-limited).
+    # NB the point projected is the tracked box CENTRE, not the feet — a measured defect that
+    # inflates false positives, documented and unfixed (EXPERIMENTS_LOG 2026-08-11).
     crosses_ego_road: bool
 
     # [CONFIRMED] Crossing onset — timestamp of the first frame on the ego road.
@@ -151,9 +118,9 @@ sample:
     crossing_frame_timestamp: str   # UTC ISO, = t_c
 
     # [BENCHED 2026-07-08] The ego-corridor swept-path label (crosses_ego_corridor +
-    # ego_distance_at_crossing_m) was the old PRIMARY label. The crossing action is now feet-on-road
-    # (the corridor requires no per-frame road). The computation is preserved in zodped.labeling.corridor, can be revived as Step-4 aux feature
-    # (ego-relevance / metric range-to-crossing). Not emitted by the current pipeline.
+    # ego_distance_at_crossing_m) was the old PRIMARY label. The crossing action is now feet-on-road. The
+    # computation is recoverable at git tag experiments/committee-pose-bringup and could return as
+    # a Step-4 aux feature (ego-relevance / metric range-to-crossing).
     #   crosses_ego_corridor: bool
     #   ego_distance_at_crossing_m: float
 
@@ -162,17 +129,11 @@ sample:
     # from intent samples but retained as a verified ped instance we could not track.
     status: determined | undetermined
 
-    # [CONFIRMED 2026-07-15] NEXT action-label source = MODEL CONSENSUS on the track-level verdict.
-    # Three local JAAD/PIE-pretrained models judge the track and vote on crossed / not crossed +
-    # when. Membership revised 2026-07-16 (pretrained weights required; final trio still in
-    # discussion): PV-LSTM (member #1, integrating first) + candidates PedGraph+ and TAMformer;
-    # pip-thesis trio + PCPA out for now — see docs/PIPELINE.md "Action label source".
-    # The geometric feet-on-road test above is the validation ANCHOR,
-    # and disagreement (model↔model or model↔anchor) routes the track to manual review.
-    # [PENDING] adaptation design — the three are TTE-style window predictors; voting rule; how consensus and geometry combine for t_c; and the GOLD gate
-    # (consensus-vs-geometry agreement) that must PASS before consensus labels at scale.
-    # Current records are geometry-only (method=rule_based_geometry).
-    method: rule_based_geometry | model_consensus
+    # [CONFIRMED] Where this track's verdict came from. GOLD carries `human_verified` wherever a
+    # person adjudicated it (precedence human > geometry); everything else is the geometric rule.
+    # A model-consensus source was specified here and dropped 2026-08-06 — see docs/PIPELINE.md
+    # "Action label source".
+    method: rule_based_geometry | human_verified
 
 
   # ─────────────────────────────────────────
@@ -183,8 +144,7 @@ sample:
     # [CONFIRMED] FORWARD-LOOKING per-window label, a SEPARATE step AFTER action labeling: given the
     # 0.5s observation window, will the pedestrian start crossing (feet on the ego ROAD, see
     # `action`) within the prediction horizon AFTER window_end. This is a PREDICTION, not a
-    # description of motion inside the window (the whole point of intent
-    # estimation; matches PCPA/SF-GRU on JAAD/PIE).
+    # description of motion inside the window.
     label: crossing | not_crossing | uncertain
 
     # [CONFIRMED] v1 ROUGH intent — inferred straight from the ACTION label (resolves the v0.1
@@ -200,11 +160,10 @@ sample:
       "1.5": crossing | not_crossing
       "2.0": crossing | not_crossing
 
-    # [PLANNED — the step after action consensus] Behavioral intent labeling: judge the window on
+    # [PLANNED — not implemented] Behavioral intent labeling: judge the window on
     # the pedestrian's own cues — pose / body orientation, gait, attention toward the ego vehicle,
     # social context — the PIE `intention_prob` sense of intent, distinct from the future-event
-    # derivation above. NOTE: ZOD's camera_front_blur anonymises faces, so facial expression / gaze
-    # are unavailable.
+    # derivation above.
     method: derived_from_action | behavioral | manual
 
     # [CONFIRMED] Confidence score from the labeling pipeline (independent of the label).

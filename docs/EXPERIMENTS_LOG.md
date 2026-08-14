@@ -373,11 +373,9 @@ demonstrably did — RANKING which tracks a human should watch, which is how the
 was built — and nothing more.
 
 > **Follow-up (2026-08-06, same day): training does NOT overturn this.** The 0.52 above is a
-> JAAD-trained checkpoint judged zero-shot, and retraining on ZOD lifts ranking to AUC 0.76 (see
-> "Step 4b reference baseline"). But labeling needs precision at a threshold, not ranking: the
-> trained model declares crossings at **0.29 precision** (0.46 at its best operating point) against
-> **geometry's 0.72**. Relabeling with it would make SILVER's labels worse. The decision stands, now
-> on stronger evidence.
+> JAAD-trained checkpoint judged zero-shot. Retraining on ZOD lifts *ranking* a long way and leaves
+> *labeling* precision far below geometry's, so the decision stands on stronger evidence — numbers
+> under "Step 4b reference baseline".
 
 **SILVER cannot currently be validated at all.** The 30 kept SILVER tracks carrying a human crossing
 label are 28 no/no, with one geometry crosser and one human crosser that are different tracks. There
@@ -521,3 +519,146 @@ builder (`02d_build_review_queue.py`, its output is merged and frozen), the pose
 benched and nothing downstream consumed the cache), the benched `labeling/corridor.py`, the four
 one-off `bringup_*.py` gates, `notebooks/02_bringup_gates.ipynb`, and `dataset_schema_v0.1.yaml`.
 Earlier entries in this log reference those files by name; the tag is where they live now.
+
+---
+
+## Step 2 road test: two defects found, measured, NOT fixed (2026-08-11)
+
+Step-4a splits are frozen and the Step-4c snapshot is checksummed, so changing the label rule now
+would move every reported number. Both defects are therefore measured and documented, not fixed.
+
+### 1. The rule projects the body CENTRE, not the feet — 44% of its false positives
+
+`_road_action` projects `frames[i]["position_world"]`, which is the tracked centre (the frustum
+slab's median), and tests that single pixel against the polygon. Every doc, docstring and schema
+comment in the repo says **feet** (`PIPELINE.md`, `labeling/actions.py`, `02_label_action.py`,
+`dataset_schema_v0.2.yaml`). The wording is aspirational; the code has always used the centre.
+
+It matters because a forward-looking camera maps height to apparent depth: a point ~0.9 m above the
+ground projects further up the image, so a pedestrian beside the road can have their centre inside
+the road polygon while their feet are still on the pavement.
+
+Re-ran the exact rule over all **146 GOLD declared crossings**, once with the centre and once with
+the feet (`centre.z − size_lwh[2]/2`), everything else held:
+
+| | n |
+|---|---:|
+| crossings that DISAPPEAR under a feet-based test | **20** |
+| …of which the human also said not-crossing (feet correct) | **18** |
+| …of which the human said crossing (feet loses a real one) | 2 |
+
+**18 of the 41 human-overturned false positives are caused by this one line.** On the reviewed set,
+geometry's crossing precision would go 104/145 = **0.72 → 102/125 ≈ 0.82** — the single cheapest
+label improvement identified so far.
+
+Whoever fixes it should decide the test's unit at the same time: centre and feet are both single
+points, and the honest question is whether the unit should be the box footprint instead.
+
+### 2. `EgoRoad_Debris` polygons are counted as road
+
+`load_ego_road_polygons` takes every polygon in `ego_road.json` with no class filter. ZOD ships two:
+**`EgoRoad_Road` (5,201)** and **`EgoRoad_Debris` (735)**, the latter present in **142 of 358**
+sequences. Debris polygons are spatially distinct from the road polygons, not contained in them.
+
+Of the 17 GOLD declared crossings in debris-bearing sequences, **14 rest ONLY on a debris polygon** —
+drop those polygons and the crossing vanishes. All 14 were human-reviewed; of 10 spot-checked, **5
+the human confirmed and 5 the human overturned**. So debris is not systematically wrong, but it is a
+coin flip, and it was never a deliberate decision.
+
+**GOLD is protected** — a human adjudicated every declared crosser. **SILVER is not**, and its
+exposure is unquantified.
+
+### Related: the road test is 2D and keyframe-only, by construction
+
+`ego_road.json` carries no frame or timestamp field — it is one annotation set, valid at the keyframe
+camera. The test therefore projects a 3D world point INTO that image and does point-in-polygon in
+pixels; the polygon is never lifted. Lifting it instead (ray-cast each vertex to the LiDAR ground,
+giving a world-frame polygon) would make the test a BEV containment check: that removes defect 1's
+height sensitivity entirely, and, because the road is static in the world, makes the keyframe
+annotation valid for **all** 20 s rather than one instant. The FOV limit would shrink from temporal
+to purely spatial — only what the keyframe camera could see. Untried; see PIPELINE "Direction &
+open options".
+
+---
+
+## The agreement rule re-run with the RETRAINED PV-LSTM (2026-08-10)
+
+The committee was killed on the strength of a *zero-shot* member. The obvious objection — "retrain it
+and the rule gets better" — was never actually measured, so here it is. One-off, not a shipped
+script: it reuses `04b_train_baseline.py`'s `PVLSTM` and `load_split` unchanged and keeps the weights
+that Step 4b discards, then applies the retired `agreement_rule` (recoverable at
+`experiments/committee-pose-bringup`).
+
+**The pool shrinks, and that is unavoidable.** The retired gate scored 210 tracks because its member
+had never seen ZOD — every track was held out by construction. The retrained model was fit on the
+frozen train split, so only val+test tracks can be scored honestly. Of the 216 human-reviewed tracks,
+131 produce Step-3 windows at all and **45 are held out** (20 crossers, 44% — the same boundary-heavy
+mix as the full verified set). Geometry scores 73.3% on these 45 against 74.8% on the 210, so the
+pool is not obviously unrepresentative.
+
+| member | pool | rule coverage | rule accuracy | geometry alone | rule − geometry |
+|---|---|---:|---:|---:|---:|
+| JAAD ckpt, zero-shot | 77 worksheet (broad) | 61% | **91%** | 81% | +10 |
+| JAAD ckpt, zero-shot | 210 verified (boundary) | 44% | 81.5% | 74.8% | +6.7 |
+| **retrained, GOLD-only** | **45 held-out verified** | **83.1% ± 2.3** | **76.4% ± 1.6** | **73.3%** | **+3.1** |
+
+5 seeds; ± is seed spread only. The threshold is max-F1 fitted on the pool it is scored on, i.e. the
+number is OPTIMISTIC and flatters the model — fitting it honestly on val and applying it to the pool
+gives 75.2% ± 2.4 at 82.7% coverage, +1.9 over geometry.
+
+**Retraining does lift the member, and the rule still does not earn its place.** Track-level AUC vs
+human goes 0.522 → **0.716 ± 0.040**, so the ranking gain from Step 4b reproduces at track level.
+But the rule's margin over plain geometry falls monotonically across the three rows above:
++10 → +6.7 → **+3.1**, and 3 points on 45 tracks is 1.4 tracks. The trade is: hand ~17% of the corpus
+to a human to buy an accuracy gain that is inside the noise. On SILVER's 7,384 pedestrians that is
+~1,250 tracks of review.
+
+**Coverage jumped from 44% to 83% — that is the failure, not a success.** A tie-breaker is worth
+having when it disagrees with geometry on the cases geometry gets wrong. This one learned its notion
+of crossing *from* geometry-derived labels, so it now agrees with geometry almost everywhere and
+rubber-stamps rather than arbitrates. The correlated-error worry raised when the committee was
+dropped is confirmed quantitatively.
+
+**The leaked pool shows what memorisation looks like**, and is reported only as a contrast: on the 86
+reviewed tracks inside the train split the same model scores AUC 0.82 and the rule reads 79.8%
+accuracy at 75.6% coverage against geometry's 67.4% (+12.4). Anyone re-running this without a split
+will get that number and think the committee works.
+
+**Decision unchanged.** Geometry keeps the labeling job; PV-LSTM stays a review ranker.
+
+---
+
+## Agreeing on *whether* is not agreeing on *when* — the `t_c` shift (2026-08-11)
+
+Found while plotting the human-vs-geometry review comparison. The two-reviewer settlement
+(2026-08-06) noted that 18 rows carried the same verdict with crossing offsets >0.5s apart. The same
+question can be asked of geometry against the human across the whole verified set, and it is worse
+there.
+
+On the **92 tracks where geometry and the human both say CROSSING** and both carry an anchorable
+`t_c`, comparing the human's instant to geometry's:
+
+| | value |
+|---|---|
+| median absolute shift | **1.78 s** |
+| shifted by more than one 0.5 s window | **70 of 92 (76%)** |
+| shifted by more than 2 s | 40 of 92 |
+| largest shift | 12.9 s |
+| human earlier / later / within 0.05 s | 66 / 26 / 7 |
+| signed median | −0.68 s |
+
+**Part of this is definitional and expected.** Geometry fires on the first frame whose projected
+point lands inside the polygon — the pedestrian is already in the road — while a human marks the step
+off the kerb, which is earlier. That predicts a negative bias, and the signed median (−0.68 s) shows
+it.
+
+**The spread is not explained by that.** The interquartile range is −2.88 s to +0.09 s and the tails
+run to ±13 s, i.e. geometry sometimes fires seconds late and sometimes seconds *early* (26 tracks).
+Since Step 3 anchors every observation window on `t_c`, a shifted anchor mislabels window CONTENTS
+while the window COUNT stays healthy — the same trap the two-reviewer pass found, now measured at
+four times the scale.
+
+**Consequence.** It bounds how much of GOLD's remaining label noise is a *timing* problem rather than
+a *verdict* problem, and it is an argument for the 3D road lift (open option #5): a BEV containment
+test would fire on the footprint entering the road rather than on a height-sensitive projected point,
+which should move `t_c` earlier and shrink the definitional gap. Not fixed — splits are frozen.

@@ -1,9 +1,7 @@
 # JAAD / PIE Alignment
 
 What JAAD and PIE actually annotate, how it maps onto us, and the naming/taxonomy decisions still
-open. JAAD and PIE are the two established camera-only pedestrian-intent datasets — years of
-labeling decisions we'd otherwise rediscover the hard way. Our novelty is the extra modalities and
-auto-labeling at scale; the *taxonomy* is a solved problem worth borrowing.
+open. Our novelty is the extra modalities and auto-labeling at scale; the *taxonomy* is a solved problem worth borrowing.
 
 > **§1–4 are DRAFT FOR DEBATE. Nothing in them is adopted.** §5 (curation rules) IS operational.
 > Specs verified 2026-07-02 from the repos, not memory — see Sources.

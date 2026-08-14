@@ -1,9 +1,7 @@
 # Pipeline Design & Schema
 
 What the pipeline *is* and why it's shaped this way. Dated results and evidence live in
-`docs/EXPERIMENTS_LOG.md`; current step-by-step state lives in `CLAUDE.md`.
-
-> Not settled doctrine. If something looks wrong, say so and make the case — don't silently follow.
+`docs/EXPERIMENTS_LOG.md`
 
 ## Pipeline Overview
 
@@ -28,8 +26,10 @@ with JAAD/PIE.
    ↓   ——— Steps 2–4 are the same code for both tiers ———
    ↓
 [Step 2] Action labeling — per full track, geometric.
-   ↓      crosses_ego_road : do the feet land on the ego_road polygon? (project each world point
+   ↓      crosses_ego_road : does the track land on the ego_road polygon? (project each world point
    ↓        through the KEYFRAME camera → point-in-polygon; FOV/range-limited by construction)
+   ↓        NB it projects the tracked CENTRE, not the feet — a measured defect, unfixed
+   ↓        (EXPERIMENTS_LOG 2026-08-11).
    ↓      crossing_frame_timestamp (t_c) : first frame on the road.
    ↓      EMPTY tracks (Kalman coasting from a single anchor, real_frac=0) → undetermined.
    ↓        Kept and flagged, NEVER forced to a class.
@@ -45,8 +45,8 @@ with JAAD/PIE.
    ↓        sees motion BEFORE the event. Not a dense stride grid (that re-introduces trivial
    ↓        in-crossing and post-crossing windows).
    ↓      Comparison windows for non-crossers, at the closest OBSERVED road approach.
-   ↓      Per-window filters from the TRACKED position at the window midpoint.
-   ↓      Per-window geometry, bbox sequences, ego context.
+   ↓      Per-window filters, geometry, bbox sequences and ego context, all from the TRACKED
+   ↓        position at the window midpoint.
    ↓      → data/annotations/{sample_id}.json + dataset_index.parquet
    ↓
 [Step 4] Packaging + QA
@@ -56,23 +56,15 @@ with JAAD/PIE.
              inherits splits instead of re-dealing.
           4b reference baseline on GOLD = a label SANITY CHECK (are the labels learnable, balanced,
              JAAD/PIE-comparable). QA only — the dataset is the product, not the model.
-          4c snapshot — annotations + frozen splits + schema + docs into one checksummed,
-             manifested bundle, whose README is the generated LABEL & TRACKING SUMMARY. INTERNAL:
-             it pins reported numbers to one exact state of the data, it is not a release. No raw
-             ZOD frames — samples ship relative pointers, so it stays megabytes and re-distributes
-             none of ZOD's CC BY-SA data.
+          4c snapshot — annotations + frozen splits + schema + docs into one checksummed, manifested
+             bundle, whose README is the generated LABEL & TRACKING SUMMARY. INTERNAL: it pins
+             reported numbers to one exact state of the data, it is not a release.
              → data/snapshots/zod-ped-v{version}/   (read with zodped.dataset.loader)
 ```
 
 **One counting path.** `zodped.dataset.stats` computes the funnel, the composition, and the
 per-stage provenance; `scripts/dataset_stats.py`, the snapshot manifest and `docs/LABEL_SUMMARY.md`
 all render *that*, so no reported number can disagree with the artifacts.
-
-**Consumer trap worth knowing.** A sample's `trajectory.frames` spans
-`[window_start, window_end + max_horizon]` — most rows are the FUTURE, i.e. the trajectory-prediction
-target. `loader.positions_array` defaults to `part="observed"` so the naive call cannot leak the
-label; the raw JSON offers no such guard. (`in_observation` is unrelated — it flags a real detection
-versus a coasted frame.)
 
 **Sequencing.** Build vertically on GOLD first — against verified, keyframe-anchored tracks, a wrong
 label is a labeling bug rather than track noise. Then pour SILVER through the same proven steps.
@@ -127,23 +119,19 @@ Tiers are set at Step 1 only. Everything downstream is tier-agnostic and carries
 
 ## Action label source
 
-Geometry (feet-on-road) is the **acting** Step-2 label, not the truth. It is FOV/range-limited by
-construction — the `ego_road` polygon exists only at the keyframe camera — and measured against a
-human it is wrong on roughly a quarter of the crossings it declares, in both directions. So:
+The geometric road test is the **acting** Step-2 label, not the truth: measured against a human it is
+wrong on 28% of the crossings it declares, in both directions (EXPERIMENTS_LOG 2026-08-06). So:
 
-- **GOLD** — a human reviewed essentially every geometry-declared crosser. GOLD's labels are
+- **GOLD** — a human reviewed essentially every geometry-declared crosser, so GOLD's labels are
   **human** (`02e_merge_human_labels.py`, precedence human > geometry). The question is closed there.
-- **SILVER** — nobody will watch ~9,400 tracks, so SILVER keeps **geometry** labels and ships as
-  *weak-labeled training bulk*: flagged `is_in_gold_standard=false`, `pv_disputed` retained as a
-  counted quantity, and the measured GOLD error rate (28% false-positive on declared crossings)
-  documented as expected label noise. **Never an evaluation set** — GOLD is the eval set.
+- **SILVER** — nobody will watch ~9,400 tracks, so it keeps **geometry** labels and ships as
+  *weak-labeled training bulk*, with that 28% documented as its expected noise. **Never an evaluation
+  set** — GOLD is.
 
 **The model committee was tried and dropped (2026-08-06).** The plan was geometry + PV-LSTM,
-auto-accepting where they agree. Zero-shot, PV-LSTM scores AUC **0.52** on the 217 human-verified
-tracks — a coin flip on exactly the boundary cases a tie-breaker exists to arbitrate. Retrained on
-ZOD it ranks far better (0.76), but **ranking is not labeling**: it declares crossings at 0.29
-precision against geometry's 0.72, so relabeling with it would make SILVER worse. Dropped on both
-counts. Evidence → EXPERIMENTS_LOG.
+auto-accepting where they agree. Zero-shot, PV-LSTM is a coin flip on exactly the boundary cases a
+tie-breaker exists to arbitrate; retrained on ZOD it ranks well but **ranking is not labeling**, and
+as a decision it is far less precise than geometry. Dropped on both counts; numbers in EXPERIMENTS_LOG.
 
 PV-LSTM (`vita-epfl/bounding-box-prediction`) remains useful for what it demonstrably does: **RANKING
 which tracks a human should watch**, which is how the crosser review package was built. Two lessons
@@ -177,9 +165,15 @@ Still open:
    tracklet. Fixes pass-by identity swaps and is **required for SILVER** (detector-birth is a 2D-MOT
    problem). Not a universal win: it doesn't fix frustum depth-jumps, can fragment anchor-threaded
    GOLD, and `camera_front_blur` weakens ReID.
-4. **`ego_road` polygon extent** — whether opposing lanes and separated bike lanes count. A real
+4. **`ego_road` polygon extent** — whether opposing lanes and separated bike lanes count, and
+   whether `EgoRoad_Debris` polygons should be road at all (today they are, unfiltered). A real
    share of geometry-vs-human disagreement is *definitional*, not perceptual. Cheaper to fix than
    any model change, and it shifts the crossing rate.
+5. **Lift `ego_road` to 3D instead of projecting the pedestrian to 2D.** Ray-cast each polygon
+   vertex onto the LiDAR ground to get a world-frame road surface, then test BEV containment. Two
+   wins: the height sensitivity behind the centre-vs-feet defect disappears, and because the road is
+   static in the world, one keyframe annotation becomes valid across the whole 20s clip instead of
+   one instant. Residual limit is spatial (what the keyframe camera saw), not temporal. Untried.
 
 **Resolved: staying on ZOD** (2026-06-18). KITScenes, Waymo, nuScenes and NVIDIA PhysicalAI-AV were
 re-evaluated; ZOD keeps its cam+LiDAR+radar novelty, and auto-labeling is a sound validated
@@ -199,3 +193,5 @@ Authoritative field-by-field spec → **`configs/dataset_schema_v0.2.yaml`**. Su
   availability (`min_lidar_frames_in_window`, camera frame present). Proximity is deferred to Step 3
   because the single keyframe annotation is a poor proxy for windows seconds away.
 - **Output** — one JSON per sample + a Parquet index of all scalar fields for fast filtering.
+- **Consumer trap** — `trajectory.frames` runs past the window into the prediction horizon. Read it
+  through `zodped.dataset.loader`, which documents and defends this; the raw JSON does not.

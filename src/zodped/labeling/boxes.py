@@ -19,6 +19,23 @@ from typing import List, Tuple
 import numpy as np
 
 
+def box_corners_world(center: np.ndarray, size_lwh, yaw: float) -> np.ndarray:
+    """The 8 world-frame corners of a tracked box, as (8, 3): top face first, then bottom.
+
+    Lives here, next to the box construction it unpacks, rather than at its Step-3 call site: the
+    corner order is a property of the box convention above, and anything that draws or projects a
+    shipped box must use this ordering to agree with `bbox_xyxy`.
+    """
+    length, width, height = size_lwh
+    cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+    dx = np.array([length, length, -length, -length]) / 2.0
+    dy = np.array([width, -width, width, -width]) / 2.0
+    ground = np.stack([center[0] + cos_y * dx - sin_y * dy,
+                       center[1] + sin_y * dx + cos_y * dy,
+                       np.full(4, center[2])], axis=1)
+    return np.vstack([ground + [0, 0, height / 2.0], ground - [0, 0, height / 2.0]])
+
+
 def _fill_yaw(yaw: np.ndarray, moving: np.ndarray) -> Tuple[np.ndarray, List[str]]:
     """Fill yaw on stationary frames from the nearest moving frame; flag the source per frame."""
     n = len(yaw)

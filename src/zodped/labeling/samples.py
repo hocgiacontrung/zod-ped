@@ -50,6 +50,7 @@ from zodped.dataset.keyframe import (
     parse_zod_ts,
 )
 from zodped.labeling.actions import load_ego_road_polygons, points_in_any_polygon
+from zodped.labeling.boxes import box_corners_world
 from zodped.utils.ego_motion import (
     get_T_world_lidar,
     interpolate_pose,
@@ -368,17 +369,8 @@ def project_box_xyxy(
     the camera / out of the fisheye FOV). Partially visible boxes yield the bbox of the visible
     corners — truncated exactly like an image-border crop would be.
     """
-    center = timeline.position_at(t)
     box = timeline.nearest_box(t)
-    l, wdt, h = box["size_lwh"]
-    yaw = box["yaw_world"]
-
-    c, s = np.cos(yaw), np.sin(yaw)
-    dx = np.array([l, l, -l, -l]) / 2.0
-    dy = np.array([wdt, -wdt, wdt, -wdt]) / 2.0
-    gx, gy = c * dx - s * dy, s * dx + c * dy
-    ground = np.stack([center[0] + gx, center[1] + gy, np.full(4, center[2])], axis=1)
-    corners = np.vstack([ground + [0, 0, h / 2.0], ground - [0, 0, h / 2.0]])
+    corners = box_corners_world(timeline.position_at(t), box["size_lwh"], box["yaw_world"])
 
     T_world_lidar = get_T_world_lidar(ctx.em, ctx.lidar_ext, t)
     uv, valid = project_world_to_image(corners, ctx.calib, T_world_lidar)
