@@ -662,3 +662,28 @@ four times the scale.
 a *verdict* problem, and it is an argument for the 3D road lift (open option #5): a BEV containment
 test would fire on the footprint entering the road rather than on a height-sensitive projected point,
 which should move `t_c` earlier and shrink the definitional gap. Not fixed — splits are frozen.
+
+---
+
+## Committee reframed: PAUSED, not refuted (2026-08-14)
+
+No new measurement — a re-reading of the ones above, prompted by the observation that the committee
+was killed on the strength of a single member. PedGraph+ was benched on a pose-only ceiling (~0.6)
+and TAMformer was never explored, so what the evidence actually rules out is **PV-LSTM as a voter**,
+not **voting**.
+
+What still stands, unchanged: PV-LSTM does not ship as a labeler, geometry keeps the labeling job,
+and PV-LSTM stays a review ranker. Nothing about the shipped dataset moves.
+
+What changes is the framing of the *future*. A candidate member must clear two bars:
+
+1. **Competent on ZOD**, measured on the boundary slice where geometry is uncertain — the 2026-08-06
+   entry is the cautionary case: 0.736 on a broad sample collapsed to 0.522 on the boundary.
+2. **Error-independent of geometry.** This is the bar the 2026-08-10 rerun exposed and it survives
+   any architecture swap: a member fitted to geometry-derived labels learns geometry's notion of
+   crossing, so rule coverage rose 44% → 83% while the margin over plain geometry fell to +3.1.
+   A committee whose members share geometry's errors rubber-stamps rather than arbitrates.
+   Independence has to come from a different signal (pose / gaze / scene) or from fine-tuning on
+   human-verified tracks only, respecting the frozen splits.
+
+Bar 2 is the real one, and it is why "just try a stronger model" is not by itself a plan.

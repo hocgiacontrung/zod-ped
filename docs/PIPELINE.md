@@ -91,7 +91,7 @@ normal tracking.
 and `pose(t)` is interpolated (SLERP + lerp) from `ego_motion["poses"]` at the scan timestamp — so
 ego motion is never mistaken for pedestrian motion.
 
-Per-scan: **detect + lift** → **compensate** → **predict** (to gate and to coast, not as position) →
+Per-scan: **detect + lift** → **compensate** → **predict** (to gate and to coast) →
 **associate** (GOLD anchors on the keyframe box; SILVER seeds on the first confident detection; run
 forward *and* backward from the seed) → **update** (store innovation as `kalman_confidence`) or
 **coast** (`in_observation=false`, terminate after N misses) → **RTS smooth**.
@@ -128,21 +128,31 @@ wrong on 28% of the crossings it declares, in both directions (EXPERIMENTS_LOG 2
   *weak-labeled training bulk*, with that 28% documented as its expected noise. **Never an evaluation
   set** — GOLD is.
 
-**The model committee was tried and dropped (2026-08-06).** The plan was geometry + PV-LSTM,
-auto-accepting where they agree. Zero-shot, PV-LSTM is a coin flip on exactly the boundary cases a
-tie-breaker exists to arbitrate; retrained on ZOD it ranks well but **ranking is not labeling**, and
-as a decision it is far less precise than geometry. Dropped on both counts; numbers in EXPERIMENTS_LOG.
+**The model committee is PAUSED, not refuted** (dropped 2026-08-06, reframed 2026-08-14). The plan
+was geometry + PV-LSTM, auto-accepting where they agree. It does not ship, because PV-LSTM is a coin
+flip zero-shot on exactly the boundary cases a tie-breaker exists to arbitrate, and retrained it
+ranks well but **ranking is not labeling** — as a decision it is far less precise than geometry.
 
-PV-LSTM (`vita-epfl/bounding-box-prediction`) remains useful for what it demonstrably does: **RANKING
-which tracks a human should watch**, which is how the crosser review package was built. Two lessons
-worth keeping: its intention head must be consumed as a SCORER (the released checkpoint is
-conservative, so its 0.5 argmax is degenerate), and a model's AUC on a broad sample can be carried
-almost entirely by easy negatives — always measure on the slice where the decision is actually hard.
-PedGraph+ was evaluated and benched; TAMformer was never explored.
+But that is a verdict on the *member*, not on voting. The committee was only ever tried with one
+model: PedGraph+ was benched on a pose-only ceiling and TAMformer was never explored. The idea
+remains open, and a candidate member must clear **two** bars:
 
-**Never fine-tune a member on our geometric labels** — that is circular, and the committee only has
-value as an independent judge. Fine-tuning on *human-verified* tracks is legitimate, but must respect
-the frozen splits (train-split sequences only).
+1. **Competent on ZOD** — validated on its own dataset's test split first, then on our verified
+   tracks, and measured on the boundary slice where geometry is actually uncertain (a broad-sample
+   AUC can be carried almost entirely by easy negatives).
+2. **Error-independent of geometry** — the harder bar. A member trained on our geometry-derived
+   labels learns geometry's notion of crossing, then agrees with it almost everywhere and
+   rubber-stamps rather than arbitrates. Measured: retraining pushed rule coverage 44% → 83% while
+   the margin over plain geometry *fell* to +3.1 points. Independence can
+   come from a different signal (pose / gaze / scene) or from fine-tuning on *human-verified* tracks
+   only — never from our own geometric labels, which is circular. Human-verified fine-tuning is
+   legitimate but must respect the frozen splits (train-split sequences only).
+
+Until such a member exists, geometry labels alone. PV-LSTM
+(`vita-epfl/bounding-box-prediction`) stays useful for what it demonstrably does: **RANKING which
+tracks a human should watch**, which is how the crosser review package was built. One handling note
+worth keeping — its intention head must be consumed as a SCORER; the released checkpoint is
+conservative, so its 0.5 argmax is degenerate.
 
 **Domain gap to validate through** (the PointPillars lesson): JAAD/PIE are 30 fps unblurred dashcam;
 ZOD is 10.1 Hz with anonymisation blur and a 120° lens. A 0.5s observation window is ~5 ZOD frames vs
@@ -174,6 +184,9 @@ Still open:
    wins: the height sensitivity behind the centre-vs-feet defect disappears, and because the road is
    static in the world, one keyframe annotation becomes valid across the whole 20s clip instead of
    one instant. Residual limit is spatial (what the keyframe camera saw), not temporal. Untried.
+6. **A committee member that clears both bars** — see "Action label source". Voting was only ever
+   tried with PV-LSTM; the open question is whether a member exists that is competent on ZOD *and*
+   error-independent of geometry.
 
 **Resolved: staying on ZOD** (2026-06-18). KITScenes, Waymo, nuScenes and NVIDIA PhysicalAI-AV were
 re-evaluated; ZOD keeps its cam+LiDAR+radar novelty, and auto-labeling is a sound validated

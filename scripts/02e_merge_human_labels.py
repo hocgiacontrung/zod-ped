@@ -11,7 +11,7 @@ INPUTS (two disjoint human passes; overlap is a hard error)
   * review/gold_crosser_worksheet.csv — the 2026-08 crosser review, reviewed independently by two
     people and settled into this one file (86% raw agreement — docs/EXPERIMENTS_LOG.md).
   * review/curation_worksheet.csv     — the earlier hand-curated batch, `tier == gold` rows only.
-    Its silver rows are out of scope (SILVER keeps committee labels).
+    Its silver rows are out of scope (SILVER keeps geometry labels).
 
 Offsets in both are SECONDS RELATIVE TO THE KEYFRAME (`info.json: keyframe_time`). `pre_obs` means the
 crossing had already begun before the track was observed, so no t_c exists inside the clip.

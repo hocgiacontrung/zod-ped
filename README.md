@@ -43,14 +43,16 @@ pip install -e . --no-deps    # register the `zodped` library (editable; no sys.
 
 Data must be downloaded separately via the ZOD CLI. See `docs/DATA_FORMAT.md`.
 
+New to the repo? → `docs/HANDOVER.md` (read order, exact commands to re-run the pipeline).
+
 ## Project Structure
 
 ```
 src/zodped/   importable library (pip install -e .): dataset, labeling, utils
-scripts/      runnable entry-points (pipeline steps, viz/demo, bring-up gates)
+scripts/      runnable entry-points: pipeline steps, QC, visualisation
 notebooks/    exploration and analysis
 configs/      pipeline parameters + dataset schema
-docs/         data format, pipeline design, experiments log, JAAD/PIE alignment
+docs/         handover guide, data format, pipeline design, experiments log, label summary
 ```
 
 ## License

@@ -1,13 +1,12 @@
 # zod-ped — Label & Tracking Summary  (snapshot v0.2)
 
 > **INTERNAL — NOT FOR DISTRIBUTION.** The labels are auto-generated and only partially
-> human-verified. This snapshot exists to pin a set of numbers to one exact state of the data, so
-> results stay reproducible while the work continues. It is not a public dataset release, and the
-> limitations below are the reason.
+> human-verified. This snapshot pins a set of numbers to one exact state of the data, so results
+> stay reproducible while the work continues. The limitations below are why.
 
 Multimodal pedestrian intent & trajectory dataset built on the Zenseact Open Dataset (ZOD). Camera + LiDAR + radar, where JAAD/PIE/PSI are camera-only.
 
-Built 2026-08-10T06:58:33+00:00 from commit `b4d74d6b7fb5`.
+Built 2026-08-14T13:56:43+00:00 from commit `b642c52680f8` (tree dirty at build time).
 Schema: `schema/dataset_schema_v0.2.yaml`.
 
 ## Read this first — what state the labels are actually in
@@ -18,9 +17,7 @@ Schema: `schema/dataset_schema_v0.2.yaml`.
 4. **SILVER's accuracy has never been measured directly** — too few SILVER tracks carry a human label. Its error rate is GOLD's, carried over on the assumption the rule behaves the same; SILVER's tracks are farther and noisier, so that assumption is optimistic.
 5. **The evaluation set is small** — GOLD test holds 35 positive windows out of 200. Differences of a few points between models mean nothing at that size.
 6. **The labels are contested even among humans** — two reviewers agreed on ~86% of the verified tracks, so this task has no clean ceiling.
-
-Nothing here is a surprise or a regression; it is the honest accounting, and it is why this is a
-snapshot rather than a release.
+7. **The rule is FOV- and range-limited by construction** — the `ego_road` polygon exists only at the keyframe camera, so a crossing outside that view cannot be seen at all.
 
 ## What was done to the data
 
@@ -33,20 +30,17 @@ snapshot rather than a release.
 | 4b · sanity check | 740 train windows | GOLD test AUC **0.7635** ± 0.0251 | AP 0.3753 vs chance 0.1759 — labels learnable |
 
 Design rationale for each stage → `docs/PIPELINE.md`. Dated evidence and the rejected
-alternatives → `docs/EXPERIMENTS_LOG.md`. Detector and frustum bring-up numbers live only in the
-log, deliberately, so they have exactly one home.
+alternatives → `docs/EXPERIMENTS_LOG.md`.
 
 ## What a sample is
 
 One sample is a **(pedestrian, time window)** pair: a 0.5s observation window over one tracked
-pedestrian, carrying a forward-looking intent label.
+pedestrian, carrying a forward-looking intent label at each of the 1.0, 1.5, 2.0s horizons.
 
 **Action is not intent.** `action.crosses_ego_road` is a verdict about the *whole track* — did
 this person cross the ego road, and when. `intent.labels_by_horizon` is *per window* and looks
 *forward* — will crossing start within the horizon **after** the window ends. Training on the
 action field turns intent prediction into action detection and breaks comparability with JAAD/PIE.
-
-Labels are provided at three prediction horizons: 1.0, 1.5, 2.0 seconds.
 
 ## Dataset structure
 
@@ -71,29 +65,31 @@ reasoning behind each field → `schema/dataset_schema_v0.2.yaml`.
 - `method` — `rule_based_geometry`, or `human_verified` where a person adjudicated the track.
 
 **`intent` — one label per WINDOW, looking forward**
-- `labels_by_horizon` — `crossing` / `not_crossing` at each of 1.0, 1.5, 2.0s. The label asks
-  whether `t_c` falls in the horizon AFTER `window_end`, not what happens inside the window.
+- `labels_by_horizon` — `crossing` / `not_crossing` at each horizon. The label asks whether `t_c`
+  falls in the horizon AFTER `window_end`, not what happens inside the window.
 - `label` — the scalar reading of the above at this window's own `anchor_tte_s`.
 - `crossing_definition` — the rule in one line, carried with the data.
 - `confidence`, `soft_label` — `p_crossing` / `p_not_crossing` / `p_uncertain`.
 
-**`trajectory.frames[]` — the observation window, ~5 frames at 10.1 Hz**
+**`trajectory.frames[]` — ~5 frames at 10.1 Hz, plus the horizon**
 - `timestamp`, `in_observation` — the instant, and whether the detector really saw the pedestrian
   there or the tracker coasted through a miss.
 - `position_world[3]`, `position_ego_rel[3]` — metres, world frame and ego-relative.
 - `box.center_world[3]`, `box.size_lwh[3]`, `box.yaw_world`, `box.yaw_source` — the tracked 3D box.
 - `num_lidar_points`, `kalman_confidence`, `tracking_method` — how well supported that frame is.
 
-> The array spans `[window_start, window_end + max_horizon]`, so it deliberately contains frames
-> AFTER the window — they are the trajectory-prediction target. Reading it whole trains on the
-> answer. `loader.positions_array` defaults to `part="observed"`; future frames are opt-in.
+> **This array is not the observation window.** It spans `[window_start, window_end + max_horizon]`,
+> so most of its rows lie *after* the window — they are the trajectory-prediction target, and
+> reading it whole trains on the answer. `loader.positions_array` defaults to `part="observed"`;
+> the raw JSON gives you no such protection. (`in_observation` is unrelated — it flags a real
+> detection versus a coasted one.) `boxes_array` is window-only and always safe.
 
 **`multimodal` — pointers into ZOD, which is not bundled**
 - `camera_frames[]` — `path`, `timestamp`, `bbox_xyxy[4]` (the 3D box projected into the image),
   `bbox_source`, `n_box_corners_visible`.
 - `lidar_scans[]` — `path`, `timestamp`; one scan per frame.
-- `radar_path` — the sequence's radar file; slice it to this window with
-  `loader.load_radar_window`.
+- `radar_path` — the sequence's radar file. ZOD ships one `.npy` per sequence holding every sweep,
+  so slice it to this window with `loader.load_radar_window`.
 
 **`context` — the scene at the window midpoint**
 - `ego_speed_ms`, `ego_heading_deg`, `turn_indicator` — what the ego vehicle was doing.
@@ -106,8 +102,7 @@ reasoning behind each field → `schema/dataset_schema_v0.2.yaml`.
 - `is_in_gold_standard`, `label_confidence_tier` — which tier this row belongs to. Evaluate on GOLD.
 - `location`, `collection_date` — ZOD's country code and capture date.
 - `num_pedestrians_in_scene`, `is_key_pedestrian` — scene context. Both depend on the tier a Step-3
-  run loaded; the shipped values come from the full pass.
-
+  run loaded; the shipped values come from the full pass, and are the accurate ones. Known wart.
 
 ## Contents
 
@@ -122,7 +117,7 @@ CHECKSUMS.sha256  SHA-256 of every file above
 
 **Raw sensor data is not included.** Samples point at ZOD camera/LiDAR/radar files by path
 relative to the sequence directory. Download ZOD separately and resolve them with
-`zodped.dataset.loader.media_paths`.
+`loader.media_paths`.
 
 ## Composition (horizon 2.0s)
 
@@ -146,10 +141,10 @@ relative to the sequence directory. Download ZOD separately and resolve them wit
 | **GOLD** | human-verified labels — **the evaluation set** | 1043 | **0.173** |
 | **SILVER** | geometry labels, weak — training bulk, never evaluation | 3406 | 0.026 |
 
-SILVER's crossing rate is far lower by construction, not by error: ZOD annotates only pedestrians
-a human judged relevant, and relevant overwhelmingly means near the road, while the detector finds
-everyone else — far, peripheral, on the pavement. A combined ratio therefore describes neither
-tier. Every index row carries `is_in_gold_standard`, so the two are always separable.
+SILVER's crossing rate is far lower **by construction, not by error**: ZOD annotates only the
+pedestrians a human judged relevant, and relevant overwhelmingly means near the road, while the
+detector finds everyone else — far, peripheral, on the pavement. A combined ratio describes neither
+tier, so never quote one. Every index row carries `is_in_gold_standard`.
 
 ## Loading
 
@@ -171,13 +166,6 @@ from zodped.dataset.loader import media_paths, load_radar_window
 paths = media_paths(doc, "data/raw/sequences")
 radar = load_radar_window(doc, "data/raw/sequences")   # returns inside this window
 ```
-
-> **`trajectory.frames` is not the observation window.** It spans
-> `[window_start, window_end + max_horizon]`, so most of its rows lie *after* the window — they
-> are the trajectory-prediction target. Passing them to a model as input leaks the answer.
-> `positions_array` defaults to `part="observed"` for exactly this reason; the raw JSON gives you
-> no such protection. (The per-frame `in_observation` flag is unrelated — it means the tracker had
-> a real detection rather than coasting.) `boxes_array` is window-only and always safe.
 
 Splits are **sequence-level and frozen** — windows from one sequence share frames, pedestrians and
 scene, so a sample-level split would leak near-duplicates into test. Use the shipped `split`
@@ -203,25 +191,10 @@ The `distance_to_ego` gate is the largest single filter and is deliberate — it
 filter, not a data-availability one. Relaxing it makes the crossing ratio *worse*, because the
 pedestrians it admits are far ones who never cross. Measured; see EXPERIMENTS_LOG.
 
-## Other caveats
-
-Beyond the label-quality accounting at the top:
-
-1. **Geometry is FOV- and range-limited by construction.** The `ego_road` polygon exists only at
-   the keyframe camera, so crossings outside that view cannot be seen by the rule at all.
-2. **Radar is per-sequence, not per-window.** ZOD ships one structured `.npy` per sequence holding
-   every sweep; `radar_path` points at that blob. Use `loader.load_radar_window` to slice it.
-3. **`num_pedestrians_in_scene` / `is_key_pedestrian` are population-dependent.** The values here
-   come from the full-population pass and are the accurate ones, but re-running the pipeline over
-   a single tier would recompute them differently. Known wart, not yet fixed.
-4. **The model committee was tried and dropped.** PV-LSTM ranks review candidates well but decides
-   badly (0.29 precision against geometry's 0.72), so it labels nothing. Evidence in
-   EXPERIMENTS_LOG.
-
 ## Provenance and licence
 
 Underlying sensor data is the **Zenseact Open Dataset**, CC BY-SA 4.0, obtained separately from
-<https://zod.zenseact.com/> under its own terms. This snapshot redistributes no ZOD data — only
-annotations and relative pointers. Code: MIT.
+<https://zod.zenseact.com/> under its own terms. This snapshot ships annotations and relative
+pointers only. Code: MIT.
 
 Produced at the Intelligent Robotics Lab, Aalto University.

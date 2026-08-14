@@ -46,8 +46,8 @@ bicycle/motorcycle.
 
 ### 2.1 `agent_class` is orthogonal to GOLD/SILVER — we likely want both
 
-GOLD/SILVER is a **provenance** axis (how a track is born). JAAD's class is a
-**relevance/resolvability** axis. Independent; conflating them would be a mistake.
+GOLD/SILVER is a **provenance** axis (how a track is born); JAAD's class is a
+**relevance/resolvability** axis. Two independent axes.
 
 | JAAD class | our equivalent |
 |---|---|

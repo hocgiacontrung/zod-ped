@@ -281,9 +281,8 @@ def build_summary(manifest: dict, horizon: str) -> str:
     return f"""# zod-ped — Label & Tracking Summary  (snapshot v{manifest["version"]})
 
 > **INTERNAL — NOT FOR DISTRIBUTION.** The labels are auto-generated and only partially
-> human-verified. This snapshot exists to pin a set of numbers to one exact state of the data, so
-> results stay reproducible while the work continues. It is not a public dataset release, and the
-> limitations below are the reason.
+> human-verified. This snapshot pins a set of numbers to one exact state of the data, so results
+> stay reproducible while the work continues. The limitations below are why.
 
 {manifest["description"]}
 

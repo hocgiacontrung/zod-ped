@@ -42,8 +42,11 @@ Four standing rules, each measured — evidence and numbers in `docs/EXPERIMENTS
 
 - **Report the tiers SEPARATELY**, never a combined crossing ratio. GOLD is the eval set; SILVER is
   weak-labeled training bulk. Every index row carries `is_in_gold_standard`.
-- **Committee is OFF (2026-08-06)** and training does not revive it — PV-LSTM ranks well but labels
-  badly. It stays a review RANKER; SILVER keeps geometry labels.
+- **Committee is PAUSED, not refuted** (2026-08-06, reframed 2026-08-14). Voting is still a sound
+  idea; it was only ever tried with PV-LSTM, which ranks well but labels badly. Today geometry
+  labels alone and PV-LSTM stays a review RANKER. A future member must clear two bars: competent
+  on ZOD, **and** error-independent of geometry — a member trained on geometry-derived labels
+  rubber-stamps instead of arbitrating (measured).
 - **GOLD's crossing ratio sits below the 20–30% target band** — the honest number after the human
   pass. The one untried lever is chasing geometry's misses in the geo=no/PV=no slice nobody has sampled.
 - **Known wart:** `num_pedestrians_in_scene` / `is_key_pedestrian` depend on which `--tier` a Step-3
@@ -56,13 +59,12 @@ Four standing rules, each measured — evidence and numbers in `docs/EXPERIMENTS
 timestamp offset, 2D-only guard, 55ms scan-gap limit → `docs/DATA_FORMAT.md`.
 
 ## Key Constraints
-- LiDAR files are named by UTC timestamp, not frame index — always match by timestamp
 - ZOD annotates only 1 keyframe per sequence (central frame of the 20s clip)
 - Do NOT use the `ZodSequences` loader — read the JSON files directly (the full trainval index is
   unavailable for partial downloads). The rest of the devkit is installed and fine to use
   (e.g. `project_3d_to_2d_kannala`)
 - No budget for VLMs — local open-source models only
-- Never run JAAD's `split_clips_to_frames.sh` (169GB; disk won't fit — decode on the fly)
+- If you re-clone JAAD, never run its `split_clips_to_frames.sh` (169GB; decode on the fly instead)
 
 ## Project Layout
 ```
@@ -79,7 +81,6 @@ zod-ped/
 │   │   └── splits/                    ← Step 4a FROZEN sequence_splits.json
 │   ├── annotations/            ← Step 3 per-sample JSON + dataset_index.parquet
 │   ├── snapshots/              ← Step 4c bundles (gitignored; rebuild with 05_package_snapshot.py)
-│   ├── external/JAAD/          ← ykotseruba/JAAD clone + JAAD_clips/
 │   └── pedestrian_sequences.json
 ├── src/zodped/                 ← the importable library (`pip install -e . --no-deps`)
 │   ├── dataset/                ← keyframe.py, splits.py, stats.py, loader.py, packaging.py
@@ -94,6 +95,7 @@ zod-ped/
 ## Reference Docs
 | doc | what lives there |
 |---|---|
+| `docs/HANDOVER.md` | how to run it — read order, exact commands, what is not in git |
 | `docs/DATA_FORMAT.md` | sensor specs, file formats, frame conventions |
 | `docs/PIPELINE.md` | pipeline design, architecture, schema summary, open options |
 | `docs/EXPERIMENTS_LOG.md` | dated evidence — every result and decision, with numbers |
